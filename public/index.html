@@ -277,9 +277,54 @@ body{font-family:var(--sans);background:var(--paper);color:var(--ink);overflow:h
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--line-dim);border-radius:6px;border:2px solid var(--paper)}
+
+/* ---------- AUTH OVERLAY ---------- */
+.auth-overlay{
+  position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;
+  background:radial-gradient(circle at 50% 20%, rgba(20,30,50,.55), var(--paper) 70%);
+  backdrop-filter:blur(6px);
+}
+.auth-overlay.hidden{display:none}
+.auth-card{
+  width:320px;background:var(--panel);border:1px solid var(--line-dim);border-radius:10px;
+  padding:26px 24px;display:flex;flex-direction:column;gap:14px;box-shadow:0 20px 60px rgba(0,0,0,.5);
+}
+.auth-title{font-family:var(--mono);font-size:16px;letter-spacing:.06em;color:var(--ink);font-weight:600}
+.auth-sub{font-size:12px;color:var(--ink-dim);margin-top:-10px}
+.auth-field{display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--ink-dim);text-transform:uppercase;letter-spacing:.08em;font-family:var(--mono)}
+.auth-field input{
+  background:rgba(0,0,0,.35);border:1px solid var(--line-dim);border-radius:5px;color:var(--ink);
+  padding:8px 10px;font-size:13px;font-family:var(--sans);outline:none;
+}
+.auth-field input:focus{border-color:var(--trace)}
+.auth-error{font-family:var(--mono);font-size:11px;color:var(--warn);min-height:14px}
+.auth-submit{
+  background:color-mix(in srgb,var(--trace) 18%, transparent);border:1px solid var(--trace);border-radius:6px;
+  color:var(--ink);font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;
+  padding:9px 0;cursor:pointer;
+}
+.auth-submit:hover{background:color-mix(in srgb,var(--trace) 28%, transparent)}
+.auth-submit:disabled{opacity:.6;cursor:default}
+.auth-user{color:var(--ink-dim);font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:none}
 </style>
 </head>
 <body data-root="kubectl">
+<div class="auth-overlay" id="authOverlay">
+  <form class="auth-card" id="authForm" autocomplete="on">
+    <div class="auth-title">Command Atlas</div>
+    <div class="auth-sub">Sign in with your local server account</div>
+    <label class="auth-field">
+      <span>Username</span>
+      <input type="text" id="authUser" name="username" autocomplete="username" required>
+    </label>
+    <label class="auth-field">
+      <span>Password</span>
+      <input type="password" id="authPass" name="password" autocomplete="current-password" required>
+    </label>
+    <div class="auth-error" id="authError"></div>
+    <button type="submit" class="auth-submit" id="authSubmit">Sign in</button>
+  </form>
+</div>
 <div class="horizon"><div class="ceiling"></div><div class="floor"></div><div class="glowline"></div></div>
 
 <div class="stack">
@@ -312,16 +357,18 @@ body{font-family:var(--sans);background:var(--paper);color:var(--ink);overflow:h
       <span class="deck-title">Terminal Deck</span>
       <span class="statuspill" id="statusPill" data-state="offline">offline</span>
       <span id="shellMeta" style="opacity:.7"></span>
+      <span class="auth-user" id="authUserLabel"></span>
       <label class="autorun"><input type="checkbox" id="autorun"> auto-run sent commands</label>
       <span class="deck-btn spacer"></span>
       <button class="deck-btn" id="reconnectBtn">reconnect</button>
       <button class="deck-btn" id="collapseBtn">collapse</button>
+      <button class="deck-btn" id="logoutBtn">logout</button>
     </div>
     <div class="deck-body">
       <div class="termwrap" data-term="1" id="wrap1">
         <div class="term-head"><span class="tdot"></span>Term 1<span class="tmeta" id="meta1"></span></div>
         <div class="term-mount" id="term1"></div>
-        <div class="term-offline">backend not connected.<br>start it with <code>npm start</code> and open the printed URL.</div>
+        <div class="term-offline">backend not connected.<br>start it with <code>sudo npm start</code> and sign in above.</div>
       </div>
       <div class="termwrap" data-term="2" id="wrap2">
         <div class="term-head"><span class="tdot"></span>Term 2<span class="tmeta" id="meta2"></span></div>
@@ -1440,12 +1487,10 @@ const Deck = (function(){
   }
   function connect(){
     if(!hasXterm) return;
-    const params=new URLSearchParams(location.search);
-    const token=params.get('token');
-    if(location.protocol==='file:' || !token){ setStatus('offline'); offlineBanner(); return; }
+    if(location.protocol==='file:'){ setStatus('offline'); offlineBanner(); return; }
     setStatus('connecting');
     const proto=location.protocol==='https:'?'wss':'ws';
-    try{ ws=new WebSocket(`${proto}://${location.host}/pty?token=${encodeURIComponent(token)}`); }
+    try{ ws=new WebSocket(`${proto}://${location.host}/pty`); }
     catch(e){ setStatus('offline'); return; }
     ws.onopen=()=>{ wsReady=true; setStatus('live');
       document.getElementById('wrap1').classList.add('connected');
@@ -1458,7 +1503,13 @@ const Deck = (function(){
     ws.onclose=()=>{ wsReady=false; setStatus('offline');
       document.getElementById('wrap1').classList.remove('connected');
       document.getElementById('wrap2').classList.remove('connected');
-      scheduleReconnect(); };
+      // The socket may have closed because the session expired (rather than a
+      // transient drop) — check before blindly reconnecting into another 401.
+      fetch('/api/me', {credentials:'same-origin'}).then(r=>{
+        if(r.ok) scheduleReconnect();
+        else if(typeof Auth!=='undefined') Auth.expired();
+      }).catch(()=>scheduleReconnect());
+    };
     ws.onerror=()=>{ setStatus('offline'); };
   }
   function scheduleReconnect(){ clearTimeout(reconnectT); reconnectT=setTimeout(connect, 2500); }
@@ -1466,7 +1517,7 @@ const Deck = (function(){
   function offlineBanner(){
     if(!hasXterm) return;
     [1,2].forEach(n=>{ terms[n].writeln('\x1b[90m— backend not connected —\x1b[0m');
-      terms[n].writeln('\x1b[90mrun \x1b[33mnpm start\x1b[90m and open the printed URL to get a live shell here.\x1b[0m'); });
+      terms[n].writeln('\x1b[90mrun \x1b[33msudo npm start\x1b[90m and sign in above to get a live shell here.\x1b[0m'); });
   }
   function fitAll(){ [1,2].forEach(n=>{ if(fits[n]){ try{ fits[n].fit(); wsSend({type:'resize',term:n,cols:terms[n].cols,rows:terms[n].rows}); }catch{} } }); }
   function setActive(n){ active=n;
@@ -1527,12 +1578,66 @@ const Deck = (function(){
   document.getElementById('clearHist').addEventListener('click', ()=>Deck.clearHistory());
 })();
 
+/* ═══════════════════════ AUTH ═══════════════════════ */
+const Auth = (function(){
+  const overlay=document.getElementById('authOverlay');
+  const form=document.getElementById('authForm');
+  const userInput=document.getElementById('authUser');
+  const passInput=document.getElementById('authPass');
+  const errorEl=document.getElementById('authError');
+  const submitBtn=document.getElementById('authSubmit');
+  const userLabel=document.getElementById('authUserLabel');
+  const logoutBtn=document.getElementById('logoutBtn');
+  let booted=false;
+
+  function setUser(username){ if(userLabel) userLabel.textContent = username ? ('· '+username) : ''; }
+  function show(msg){ overlay.classList.remove('hidden'); errorEl.textContent = msg||''; passInput.value=''; setTimeout(()=>userInput.focus(),0); }
+  function hide(){ overlay.classList.add('hidden'); errorEl.textContent=''; }
+
+  function boot(username){
+    setUser(username); hide();
+    if(!booted){ booted=true; Deck.init(); }
+    else { Deck.reconnect(); }
+  }
+
+  async function checkSession(){
+    try{
+      const r=await fetch('/api/me', {credentials:'same-origin'});
+      if(r.ok){ const d=await r.json(); boot(d.username); }
+      else show();
+    }catch{ show('could not reach the server'); }
+  }
+
+  form.addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    submitBtn.disabled=true; errorEl.textContent='';
+    try{
+      const r=await fetch('/api/login', {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ username: userInput.value.trim(), password: passInput.value }),
+      });
+      const d=await r.json().catch(()=>({}));
+      if(r.ok) boot(d.username);
+      else { errorEl.textContent = d.error || 'sign-in failed'; passInput.value=''; passInput.focus(); }
+    }catch{ errorEl.textContent='could not reach the server'; }
+    finally{ submitBtn.disabled=false; }
+  });
+
+  if(logoutBtn) logoutBtn.addEventListener('click', async ()=>{
+    try{ await fetch('/api/logout', {method:'POST', credentials:'same-origin'}); }catch{}
+    location.reload();
+  });
+
+  checkSession();
+  return { expired(){ setUser(null); show('session expired — sign in again'); } };
+})();
+
 /* ═══════════════════════ BOOT ═══════════════════════ */
 window.addEventListener('resize', ()=>layout());
 layout();
 renderReadout();
 refreshFocusVisual();
-Deck.init();
 </script>
 </body>
 </html>

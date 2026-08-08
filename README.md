@@ -4,16 +4,21 @@ An interactive CLI mind-map (kubectl · docker · linux · openclaw · openshell
 **real terminal deck** wired to actual shells on your machine. Assemble a command in the
 map, then send it straight into a live session with one click.
 
-Because a browser page cannot open a shell on the host by itself (the sandbox forbids it —
-and thank goodness, or every website could run commands on your computer), this ships as a
-tiny local backend. You run it; the page connects to `localhost`; the shells are real.
+This ships as a small **multi-user** backend: it serves the Atlas page over the network,
+authenticates each visitor against a **real local Linux account** (PAM — the same check
+`login`/`sshd` use), and gives them a shell that runs *as that user*, starting in *their own*
+home directory. Nobody gets in without a valid account on the host, and nobody's shell can
+touch another user's files unless the filesystem already allows it.
+
+Source: **https://github.com/script-repo/command-atlas**
 
 ```
-command-atlas-terminal/
-├── server.js        # local backend: serves the page + brokers real PTY sessions
+command-atlas/
+├── server.js       # backend: PAM login, sessions, and per-user PTY sessions
+├── install.sh       # fresh-system installer (Node.js, build tools, PAM headers, npm install)
 ├── package.json
 ├── public/
-│   └── index.html   # the atlas + terminal deck (one self-contained page)
+│   └── index.html  # the atlas + terminal deck (one self-contained page)
 └── README.md
 ```
 
@@ -21,44 +26,69 @@ command-atlas-terminal/
 
 ## Prerequisites
 
+- **Linux.** This backend uses PAM and `/bin/login` to authenticate users and drop
+  privileges to their shell — there is no Windows/macOS equivalent, so it only runs on Linux.
+- **git**, to clone [the repo](https://github.com/script-repo/command-atlas).
 - **Node.js 18 or newer** (`node --version`).
-- **Native build tools** — `node-pty` compiles a small native addon on install:
-  - **macOS:** `xcode-select --install`
-  - **Debian/Ubuntu:** `sudo apt install -y build-essential python3`
-  - **RHEL/Fedora:** `sudo dnf install -y gcc-c++ make python3`
-  - **Windows:** a recent Node includes the build tools; if not, install
-    “Desktop development with C++” from Visual Studio Build Tools.
+- **Native build tools** — `node-pty` and `authenticate-pam` each compile a small native
+  addon on install:
+  - **Debian/Ubuntu:** `sudo apt install -y build-essential python3 libpam0g-dev`
+  - **RHEL/Fedora:** `sudo dnf install -y gcc-c++ make python3 pam-devel`
+- **Root.** The server process itself must run as root (see *Security* below).
+
+## Quick install (Ubuntu/Debian)
+
+On a fresh Ubuntu/Debian box, this single command clones the repo and installs Node.js, the
+native build tools, the PAM dev headers, and the npm dependencies — everything needed to run it:
+
+```bash
+git clone https://github.com/script-repo/command-atlas.git && cd command-atlas && sudo bash install.sh
+```
+
+That clones the repo and runs [`install.sh`](./install.sh). To update and re-install later:
+
+```bash
+cd command-atlas && git pull && sudo bash install.sh
+```
+
+On RHEL/Fedora, or if you'd rather install things yourself, clone the repo, see the manual
+package list above, then just run `npm install`.
 
 ## Run it
 
 ```bash
-cd command-atlas-terminal
-npm install        # installs xterm, ws, node-pty (compiles node-pty)
-npm start          # or: node server.js
+git clone https://github.com/script-repo/command-atlas.git
+cd command-atlas
+npm install            # installs xterm, ws, node-pty, authenticate-pam (compiles native code)
+sudo npm start          # or: sudo node server.js — root is required, see below
 ```
 
-On start it prints a URL with a one-time token:
+On start it prints where it's listening:
 
 ```
-    http://127.0.0.1:7420/?token=<random-hex>
+  Listening on : http://0.0.0.0:7420  (reachable on the network)
 ```
 
-Open that URL. The status pill in the deck header turns **live** and both terminals give you
-a real shell. Type in them like any terminal (tab-completion, `vim`, `top`, all of it).
+Open `http://<this-host>:7420/` from any machine on the network. You'll land on a sign-in
+card — enter the **username and password of a real account on this host**. On success you get
+the atlas plus two live terminals, each running as you, each starting in your home directory.
 
-Change the port with `PORT=8080 npm start`. Pin the token with `ATLAS_TOKEN=... npm start`.
+Change the port with `PORT=8080 sudo npm start`. Bind to a single interface instead of every
+interface with `HOST=192.168.1.10 sudo npm start`.
 
 ---
 
 ## Using the deck
 
-- **Two live shells** side by side, each a full PTY, plus a **history pane** on the right.
+- **Two live shells** side by side, each a full PTY running as *your* account, plus a
+  **history pane** on the right.
 - **Drag the divider** between the map and the deck to resize; **double-click** it (or the
   *collapse* button) to fold the deck away.
 - On a compiled command, alongside **copy** you get **▶ term 1** and **▶ term 2** — these
   push the command into that live shell and log it to history.
 - **History pane:** every sent command with a T1/T2 badge and time. Click any entry to send
   it again.
+- **logout** in the deck header ends your session and clears your terminals.
 
 ### Auto-run toggle (a safety choice)
 
@@ -71,44 +101,82 @@ and hit Enter yourself. Turn it on and sent commands execute immediately.
 
 ## Security — please read
 
-This tool hands out real shells, so it’s built to be **yours only**:
+This tool now hands out real shells **over the network**, to **any account on the host**, so
+read this before exposing it beyond your own machine:
 
-- **Localhost-only.** The server binds to `127.0.0.1`. It is not reachable from your network.
-- **Token required.** A random token (printed at startup) is required to load the page and to
-  open the WebSocket. Without it, connections are dropped.
-- **Origin-checked.** WebSocket upgrades are rejected unless the request’s `Origin` is this
-  same server — so a malicious website open in your browser can’t reach `localhost` and drive
-  your shell.
+- **Real authentication.** Sign-in calls PAM (`authenticate-pam`) with the username/password
+  the visitor typed — the same mechanism `login` and `sshd` use. There's no shared token, no
+  anonymous access, and no bypass: without a valid local account, nothing works.
+- **Runs as root, by necessity.** Verifying another user's password and then dropping
+  privileges to run a shell as them both require root. The server refuses to start if it
+  isn't running as root (or on a non-Linux platform).
+- **Real per-user isolation.** Each terminal is `login -f <user>` — the same program a
+  physical console uses — so it gets that user's real uid/gid *and* supplementary groups
+  (via PAM/`initgroups`), and lands in their actual home directory. One visitor's shell runs
+  with exactly the permissions that account has on the host; it cannot act as another user.
+- **Session cookies, not URL tokens.** Signing in sets an `HttpOnly`, `SameSite=Lax` session
+  cookie (`Secure` too, automatically, when TLS is enabled). Sessions expire after 12 hours by
+  default (`ATLAS_SESSION_TTL_HOURS` to change it) and can be ended any time with **logout**.
+- **Origin-checked WebSocket.** `/pty` upgrades are rejected unless the request's `Origin`
+  (when the browser sends one) matches the `Host` it was requested on — a different site open
+  in your browser can't drive your terminal.
+- **Login is rate-limited.** Repeated failed sign-ins from the same address get locked out
+  with backoff, to slow down password guessing.
 
-Given that:
+Given all that, this is still meaningfully more exposed than the original localhost-only tool:
 
-- **Do not** bind it to `0.0.0.0`, put it behind a public proxy/tunnel, or share the tokened
-  URL. Anyone who can reach it runs commands as you.
-- Treat it like an open terminal on your machine, because that’s what it is.
+- **Put TLS in front of it.** By default it serves plain HTTP, which means passwords and
+  session cookies cross the network in cleartext. Either set `ATLAS_TLS_CERT` and
+  `ATLAS_TLS_KEY` (PEM paths) to enable built-in HTTPS, or put a TLS-terminating reverse proxy
+  (nginx, Caddy, etc.) in front and only expose that.
+- **Only run it on hosts/accounts you're comfortable giving shell access to.** Every local
+  account becomes a valid login for this tool. Don't run it on a host with accounts that
+  shouldn't have remote shell access.
+- **Treat the host it runs on accordingly.** A process running as root, accepting network
+  connections, is a meaningfully larger attack surface than a localhost-only tool. Keep the
+  host patched, and prefer a trusted LAN over the open internet.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `7420` | Port to listen on |
+| `HOST` | `0.0.0.0` | Interface to bind to |
+| `ATLAS_TLS_CERT` / `ATLAS_TLS_KEY` | *(unset)* | PEM paths — set both to serve HTTPS instead of HTTP |
+| `ATLAS_SESSION_TTL_HOURS` | `12` | How long a signed-in session stays valid |
+| `ATLAS_PAM_SERVICE` | `login` | PAM service name to authenticate against (see `/etc/pam.d/`) |
 
 ---
 
 ## Troubleshooting
 
-**`npm install` fails building `node-pty`** — almost always missing build tools. Install the
-ones for your OS above, then `rm -rf node_modules && npm install`. On Linux you need a C++
-compiler (`gcc-c++`/`build-essential`) and `python3` on `PATH`.
+**`npm install` fails building `node-pty` or `authenticate-pam`** — almost always missing
+build tools or PAM headers. On Ubuntu/Debian, `sudo bash install.sh` installs all of them for
+you; on other distros, install the packages listed above, then `rm -rf node_modules && npm install`.
 
-**Page loads but the deck says “offline”** — you opened `index.html` directly (as a `file://`)
-instead of through the server, or the URL is missing its `?token=`. Start the backend and use
-the printed URL.
+**Server exits immediately with a root/permission error** — start it with `sudo npm start`
+(or run it under a systemd unit with `User=root`). PAM authentication and dropping privileges
+to another user's shell both require root.
+
+**"invalid credentials" even though the password is right** — confirm the account exists on
+*this* host (`getent passwd <user>`) and that its PAM service (`login` by default) isn't
+blocking remote/network logins in a way that also blocks this tool; try
+`ATLAS_PAM_SERVICE=sshd` if this host authenticates SSH differently from console login.
+
+**Page loads but the deck stays "offline" after signing in** — check the browser console;
+this usually means the WebSocket upgrade was rejected. Confirm you're browsing to the same
+host/port the server printed (the same-origin check compares them), and that your session
+hasn't expired (`ATLAS_SESSION_TTL_HOURS`).
 
 **Terminals are blank / won’t size** — click into a terminal, or drag the divider to force a
 re-fit. They fit on load, on window resize, and on divider drag.
-
-**Wrong shell** — the backend uses `$SHELL` (POSIX) or `%COMSPEC%` (Windows). Set `SHELL` to
-override, e.g. `SHELL=/bin/zsh npm start`.
 
 ---
 
 ## Notes
 
-- xterm.js assets are served locally from `node_modules` (no CDN), so the tool works offline.
+- xterm.js assets are served locally from `node_modules` (no CDN), so the tool works offline
+  once installed.
 - Command syntax for **openclaw** follows `docs.openclaw.ai/cli`; **openshell** follows the
   NVIDIA docs (`openshell --help` is authoritative). Both move fast — treat the atlas as a map
   and verify flags against upstream.
