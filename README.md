@@ -33,26 +33,28 @@ command-atlas/
 - **Native build tools** — `node-pty` and `authenticate-pam` each compile a small native
   addon on install:
   - **Debian/Ubuntu:** `sudo apt install -y build-essential python3 libpam0g-dev`
-  - **RHEL/Fedora:** `sudo dnf install -y gcc-c++ make python3 pam-devel`
+  - **RHEL/Rocky Linux/Fedora:** `sudo dnf install -y gcc gcc-c++ make python3 pam-devel`
 - **Root.** The server process itself must run as root (see *Security* below).
 
-## Quick install (Ubuntu/Debian)
+## Quick install (Ubuntu/Debian, RHEL, Rocky Linux, Fedora)
 
-On a fresh Ubuntu/Debian box, this single command clones the repo and installs Node.js, the
-native build tools, the PAM dev headers, and the npm dependencies — everything needed to run it:
+On a fresh box, this single command clones the repo and installs Node.js, the native build
+tools, the PAM dev headers, and the npm dependencies — everything needed to run it.
+[`install.sh`](./install.sh) auto-detects `apt-get` vs. `dnf`/`yum`, so the **same command**
+works on Ubuntu/Debian and on RHEL-family distros (Rocky Linux, RHEL, CentOS, Fedora):
 
 ```bash
 git clone https://github.com/script-repo/command-atlas.git && cd command-atlas && sudo bash install.sh
 ```
 
-That clones the repo and runs [`install.sh`](./install.sh). To update and re-install later:
+To update and re-install later:
 
 ```bash
 cd command-atlas && git pull && sudo bash install.sh
 ```
 
-On RHEL/Fedora, or if you'd rather install things yourself, clone the repo, see the manual
-package list above, then just run `npm install`.
+If you'd rather install things yourself, clone the repo, see the manual package list above for
+your distro, then just run `npm install`.
 
 ## Run it
 
@@ -151,8 +153,9 @@ Given all that, this is still meaningfully more exposed than the original localh
 ## Troubleshooting
 
 **`npm install` fails building `node-pty` or `authenticate-pam`** — almost always missing
-build tools or PAM headers. On Ubuntu/Debian, `sudo bash install.sh` installs all of them for
-you; on other distros, install the packages listed above, then `rm -rf node_modules && npm install`.
+build tools or PAM headers. Run `sudo bash install.sh` (works on Ubuntu/Debian and on
+Rocky Linux/RHEL/Fedora) to install them, or install the packages listed above by hand, then
+`rm -rf node_modules && npm install`.
 
 **Server exits immediately with a root/permission error** — start it with `sudo npm start`
 (or run it under a systemd unit with `User=root`). PAM authentication and dropping privileges
