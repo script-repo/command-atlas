@@ -65,15 +65,18 @@ npm install            # installs xterm, ws, node-pty, authenticate-pam (compile
 sudo npm start          # or: sudo node server.js — root is required, see below
 ```
 
-On start it prints where it's listening:
+On start it prints the actual LAN address(es) you can open — not the `0.0.0.0` wildcard it's
+bound to:
 
 ```
-  Listening on : http://0.0.0.0:7420  (reachable on the network)
+  Listening on :
+      http://192.168.1.42:7420
+      http://10.0.5.7:7420
 ```
 
-Open `http://<this-host>:7420/` from any machine on the network. You'll land on a sign-in
-card — enter the **username and password of a real account on this host**. On success you get
-the atlas plus two live terminals, each running as you, each starting in your home directory.
+Open one of those URLs from any machine on the network. You'll land on a sign-in card — enter
+the **username and password of a real account on this host**. On success you get the atlas plus
+two live terminals, each running as you, each starting in your home directory.
 
 Change the port with `PORT=8080 sudo npm start`. Bind to a single interface instead of every
 interface with `HOST=192.168.1.10 sudo npm start`.

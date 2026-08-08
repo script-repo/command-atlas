@@ -21,6 +21,7 @@
 const http   = require('http');
 const https  = require('https');
 const fs     = require('fs');
+const os     = require('os');
 const path   = require('path');
 const crypto = require('crypto');
 
@@ -321,13 +322,38 @@ wss.on('connection', (ws) => {
   ws.on('close', () => { Object.values(ptys).forEach((t) => { try { t.kill(); } catch {} }); });
 });
 
+// When bound to a wildcard address, print the actual LAN IP(s) a browser can
+// use instead of the meaningless 0.0.0.0 — that's a "listen on everything"
+// instruction to the OS, not a reachable address.
+function listLanAddresses() {
+  const addrs = [];
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    for (const net of ifaces || []) {
+      if (net.family === 'IPv4' && !net.internal) addrs.push(net.address);
+    }
+  }
+  return addrs;
+}
+
 server.listen(PORT, HOST, () => {
   const scheme = useTLS ? 'https' : 'http';
   const line = '─'.repeat(58);
   console.log(`\n┌${line}┐`);
   console.log('  Command Atlas — multi-user terminal backend is live');
   console.log(`└${line}┘\n`);
-  console.log(`  Listening on : ${scheme}://${HOST}:${PORT}  (reachable on the network)`);
+
+  const isWildcard = HOST === '0.0.0.0' || HOST === '::' || HOST === '';
+  const urls = isWildcard
+    ? listLanAddresses().map((ip) => `${scheme}://${ip}:${PORT}`)
+    : [`${scheme}://${HOST}:${PORT}`];
+  if (!urls.length) urls.push(`${scheme}://${HOST}:${PORT}`);
+
+  if (urls.length === 1) {
+    console.log(`  Listening on : ${urls[0]}`);
+  } else {
+    console.log('  Listening on :');
+    urls.forEach((u) => console.log(`      ${u}`));
+  }
   console.log('  Auth         : local Linux accounts via PAM — log in on the page');
   console.log('  Shells       : `login -f <user>` per terminal — starts in that user\'s own $HOME');
   if (!useTLS) {
