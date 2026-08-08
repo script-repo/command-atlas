@@ -363,6 +363,32 @@ server.on('upgrade', (req, socket, head) => {
   });
 });
 
+// `term.kill()` only signals the single PID node-pty tracks — the `login`
+// process itself. `login -f` forks internally and execs the shell as a
+// *child*, then blocks waiting for it so it can run PAM/utmp cleanup once it
+// exits. A bare SIGHUP to just `login`'s PID kills login (default signal
+// disposition) without ever touching that child, orphaning the shell —
+// still alive, still attached to the pty, session never closed. Those
+// orphans pile up across reconnects/relogins and are what caused terminals
+// to stop working. `.destroy()` closes the pty's master fd first, which
+// triggers a real kernel-level hangup delivered to the pty's whole
+// foreground process group (login *and* its shell child), so login gets to
+// actually finish its cleanup. `killPty` uses that, then double-checks with
+// a delayed SIGKILL to the process group in case anything still survives.
+function killPty(term) {
+  const pid = term.pid;
+  try {
+    if (typeof term.destroy === 'function') term.destroy();
+    else term.kill();
+  } catch { try { term.kill(); } catch {} }
+
+  setTimeout(() => {
+    try { process.kill(-pid, 0); } catch { return; } // nothing left in the group
+    try { process.kill(-pid, 'SIGKILL'); } catch {}
+    try { process.kill(pid, 'SIGKILL'); } catch {}
+  }, 2000).unref();
+}
+
 wss.on('connection', (ws) => {
   const username = ws.atlasUser;
   const ptys = {};
@@ -396,7 +422,7 @@ wss.on('connection', (ws) => {
     else if (m.type === 'resize' && m.cols > 0 && m.rows > 0) { try { t.resize(m.cols, m.rows); } catch {} }
   });
 
-  ws.on('close', () => { Object.values(ptys).forEach((t) => { try { t.kill(); } catch {} }); });
+  ws.on('close', () => { Object.values(ptys).forEach((t) => { try { killPty(t); } catch {} }); });
 });
 
 // When bound to a wildcard address, print the actual LAN IP(s) a browser can

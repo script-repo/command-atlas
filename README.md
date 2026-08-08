@@ -205,6 +205,13 @@ hasn't expired (`ATLAS_SESSION_TTL_HOURS`).
 **Terminals are blank / won’t size** — click into a terminal, or drag the divider to force a
 re-fit. They fit on load, on window resize, and on divider drag.
 
+**After logging out/back in (or reconnecting), one terminal stops working, or the other one's
+shell exits** — fixed in this version: closing a terminal now calls node-pty's `destroy()`
+(a real pty hangup to the whole session) instead of a bare `kill()`, which used to only signal
+`login`'s own PID and leave its shell child orphaned. If you hit this on a host that was running
+an older version, there may already be leaked shell processes from before the fix — check with
+`ps -ef | grep '[l]ogin -f'` and kill any that no longer correspond to an open browser tab.
+
 ---
 
 ## Notes
