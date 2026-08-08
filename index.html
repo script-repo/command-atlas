@@ -1,0 +1,1538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>command atlas — live terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Archivo:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/vendor/xterm.css">
+<style>
+:root{
+  --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:'Archivo',system-ui,-apple-system,sans-serif;
+  --node-h:36px; --ok:#7BE3A3; --gold:#FFD36B; --warn:#FF9276;
+  --deckH:42vh;
+}
+body[data-root="kubectl"]{
+  --paper:#04070E; --panel:rgba(9,16,30,.72);
+  --line:#6FA8DC; --line-dim:rgba(111,168,220,.30); --grid:rgba(111,168,220,.10);
+  --ink:#E4F0FC; --ink-dim:#8FA9C4; --trace:#FFC857; --trace-glow:rgba(255,200,87,.28);
+}
+body[data-root="docker"]{
+  --paper:#03060B; --panel:rgba(8,17,28,.72);
+  --line:#4E9BE0; --line-dim:rgba(78,155,224,.30); --grid:rgba(78,155,224,.10);
+  --ink:#E6F1FB; --ink-dim:#89A6BF; --trace:#FF8A4C; --trace-glow:rgba(255,138,76,.28);
+}
+body[data-root="linux"]{
+  --paper:#070409; --panel:rgba(20,11,22,.72);
+  --line:#C77DBA; --line-dim:rgba(199,125,186,.30); --grid:rgba(199,125,186,.10);
+  --ink:#F4ECF4; --ink-dim:#A98FA6; --trace:#F58549; --trace-glow:rgba(245,133,73,.28);
+}
+body[data-root="ssh"]{
+  --paper:#02090B; --panel:rgba(7,22,25,.72);
+  --line:#4FC5C0; --line-dim:rgba(79,197,192,.30); --grid:rgba(79,197,192,.10);
+  --ink:#E6F6F4; --ink-dim:#84ADA9; --trace:#FFB454; --trace-glow:rgba(255,180,84,.28);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:var(--sans);background:var(--paper);color:var(--ink);overflow:hidden;transition:background .5s}
+
+/* ---- 3D perspective wireframe backdrop ---- */
+.horizon{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden}
+.horizon .floor{
+  position:absolute;left:-60%;right:-60%;bottom:-45%;height:80%;
+  background-image:
+    repeating-linear-gradient(0deg, var(--grid) 0 1px, transparent 1px 56px),
+    repeating-linear-gradient(90deg, var(--grid) 0 1px, transparent 1px 56px);
+  transform:perspective(560px) rotateX(64deg);transform-origin:top center;
+  animation:floorScroll 24s linear infinite;
+  mask-image:linear-gradient(to bottom, transparent 0, #000 22%, #000 100%);
+  -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 22%, #000 100%);
+}
+.horizon .ceiling{
+  position:absolute;left:-60%;right:-60%;top:-52%;height:70%;
+  background-image:
+    repeating-linear-gradient(0deg, var(--grid) 0 1px, transparent 1px 72px),
+    repeating-linear-gradient(90deg, var(--grid) 0 1px, transparent 1px 72px);
+  transform:perspective(560px) rotateX(-64deg);transform-origin:bottom center;opacity:.55;
+  mask-image:linear-gradient(to top, transparent 0, #000 30%, #000 100%);
+  -webkit-mask-image:linear-gradient(to top, transparent 0, #000 30%, #000 100%);
+}
+.horizon .glowline{
+  position:absolute;left:0;right:0;bottom:33%;height:1px;
+  background:linear-gradient(90deg, transparent, var(--line-dim) 20%, var(--line-dim) 80%, transparent);
+  box-shadow:0 0 24px 2px var(--trace-glow);opacity:.6;
+}
+@keyframes floorScroll{from{background-position:0 0,0 0}to{background-position:0 56px,0 0}}
+@media (prefers-reduced-motion:reduce){.horizon .floor{animation:none}}
+
+/* ---- vertical stack: workbench over terminal deck ---- */
+.stack{position:relative;z-index:1;display:flex;flex-direction:column;height:100vh;height:100dvh}
+.workbench{flex:1 1 auto;min-height:0;position:relative}
+.app{display:grid;height:100%;grid-template-columns:1fr minmax(340px,430px);grid-template-rows:1fr}
+@media (max-width:767px){ .app{grid-template-columns:1fr;grid-template-rows:1fr auto} }
+
+.vgutter{
+  flex:0 0 8px;cursor:row-resize;position:relative;z-index:4;
+  background:
+    linear-gradient(180deg, transparent, var(--line-dim), transparent);
+}
+.vgutter::after{
+  content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  width:46px;height:3px;border-radius:2px;background:var(--line-dim);
+}
+.vgutter:hover::after{background:var(--trace);box-shadow:0 0 10px var(--trace-glow)}
+
+/* ---------- MAP PANE ---------- */
+.map-pane{position:relative;overflow:auto;outline:none}
+.map-inner{position:relative;min-width:100%;min-height:100%}
+.map-inner svg{position:absolute;inset:0;pointer-events:none}
+.node{
+  position:absolute;height:var(--node-h);display:flex;align-items:center;padding:0 13px;
+  font-family:var(--mono);font-size:13px;font-weight:500;color:var(--ink);
+  background:rgba(0,0,0,.55);border:1px solid var(--line-dim);border-radius:7px;
+  cursor:pointer;white-space:nowrap;user-select:none;will-change:transform;
+  transition:border-color .18s,color .18s,box-shadow .25s,opacity .22s,transform .22s cubic-bezier(.2,.9,.3,1.2);
+  animation:nodeIn .3s ease both;
+}
+@keyframes nodeIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.node{animation:none;transition-duration:.01s}}
+.node:hover{border-color:var(--line);color:#fff;transform:scale(1.03)}
+.node.root{
+  border:1.5px solid var(--line);color:var(--line);font-weight:600;font-size:15px;letter-spacing:.03em;
+  box-shadow:0 0 0 4px color-mix(in srgb, var(--line) 10%, transparent), 0 0 22px var(--trace-glow);
+}
+.node.rootitem{border-color:var(--line-dim);color:var(--ink-dim);font-weight:600;letter-spacing:.02em}
+.node.rootitem:hover{border-color:var(--line);color:var(--ink)}
+.node.on-path{
+  border-color:var(--trace);color:var(--trace);
+  box-shadow:0 0 18px var(--trace-glow), inset 0 0 10px color-mix(in srgb, var(--trace) 8%, transparent);
+  transform:scale(1.05);
+}
+.node.on-path:hover{transform:scale(1.07)}
+.node.focused{outline:2px solid var(--trace);outline-offset:3px;transform:scale(1.05);box-shadow:0 0 22px var(--trace-glow)}
+.node.on-path.focused{transform:scale(1.08)}
+.node.dimmed{opacity:.30}
+.node.leaf{border-style:dashed}
+.node.leaf.on-path{border-style:solid}
+.node .tag{font-size:9px;letter-spacing:.1em;margin-right:8px;color:var(--ink-dim);font-family:var(--mono);font-weight:600}
+.node.on-path .tag{color:var(--trace)}
+.node .diff{
+  margin-left:9px;font-size:8.5px;letter-spacing:.12em;font-family:var(--sans);font-weight:700;color:var(--gold);
+  border:1px solid color-mix(in srgb, var(--gold) 45%, transparent);border-radius:3px;padding:1px 4px;
+}
+.rootarrow{
+  position:absolute;width:34px;height:24px;display:flex;align-items:center;justify-content:center;
+  border:1px solid var(--line-dim);border-radius:6px;background:rgba(0,0,0,.5);color:var(--line);
+  font-size:11px;cursor:pointer;user-select:none;z-index:3;
+  transition:border-color .15s,color .15s,transform .15s,box-shadow .2s;
+}
+.rootarrow:hover{border-color:var(--trace);color:var(--trace);transform:scale(1.12);box-shadow:0 0 12px var(--trace-glow)}
+.rootarrow:focus-visible{outline:2px solid var(--trace);outline-offset:2px}
+
+.map-legend{
+  position:sticky;top:0;left:0;z-index:5;padding:12px 18px 0;pointer-events:none;
+  font-family:var(--mono);font-size:10px;letter-spacing:.14em;color:var(--ink-dim);text-transform:uppercase;
+  display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;
+}
+.map-legend b{color:var(--line);font-weight:500}
+.map-legend .key{color:var(--trace)}
+
+/* ---------- READOUT PANE ---------- */
+.readout{
+  background:var(--panel);backdrop-filter:blur(10px);border-left:1px dashed var(--line-dim);
+  display:flex;flex-direction:column;overflow:hidden;transition:background .5s;
+}
+@media (max-width:767px){ .readout{border-left:none;border-top:1px dashed var(--line-dim)} }
+.titleblock{
+  border-bottom:1px solid var(--line-dim);padding:14px 20px 12px;
+  display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-shrink:0;
+}
+.titleblock h1{font-size:13px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:var(--line)}
+.titleblock .rev{font-family:var(--mono);font-size:10px;color:var(--ink-dim);letter-spacing:.1em}
+.titleblock .rev b{color:var(--trace);font-weight:600}
+.readout-body{flex:1;overflow-y:auto;padding:20px}
+
+.crumbs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
+.crumb{font-family:var(--mono);font-size:11px;border:1px solid var(--line-dim);border-radius:5px;padding:3px 9px;color:var(--ink-dim)}
+.crumb.set{border-color:var(--trace);color:var(--trace)}
+
+.cmdcard{border:1px solid var(--line-dim);border-radius:9px;background:rgba(0,0,0,.45);margin-bottom:18px;overflow:hidden}
+.cmdcard .bar{
+  display:flex;align-items:center;gap:8px;padding:8px 13px;border-bottom:1px solid var(--line-dim);
+  font-family:var(--mono);font-size:10px;letter-spacing:.15em;color:var(--ink-dim);text-transform:uppercase;flex-wrap:wrap;
+}
+.cmdcard .bar .dot{width:7px;height:7px;border-radius:50%;background:var(--line-dim)}
+.cmdcard.ready .bar .dot{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.cmdcard pre{
+  padding:15px 16px;font-family:var(--mono);font-size:13.5px;line-height:1.65;
+  white-space:pre-wrap;word-break:break-word;color:var(--ink-dim);
+}
+.cmdcard.ready pre{color:var(--ok)}
+.cmdcard pre .cursor{display:inline-block;width:8px;height:15px;background:var(--line-dim);vertical-align:-2px;animation:blink 1.1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+@media (prefers-reduced-motion:reduce){.cmdcard pre .cursor{animation:none}}
+.barbtn{
+  background:none;border:1px solid var(--line-dim);border-radius:4px;color:var(--ink-dim);
+  font-family:var(--mono);font-size:10px;letter-spacing:.1em;padding:2px 8px;cursor:pointer;text-transform:uppercase;
+  transition:border-color .15s,color .15s,background .15s;
+}
+.barbtn:hover{border-color:var(--trace);color:var(--trace)}
+.barbtn.copybtn{margin-left:auto}
+.barbtn.sendbtn:hover{background:color-mix(in srgb,var(--trace) 16%, transparent);color:var(--ink)}
+.barbtn.sendbtn:disabled{opacity:.4;cursor:not-allowed;border-style:dashed}
+.barbtn.sendbtn:disabled:hover{border-color:var(--line-dim);color:var(--ink-dim);background:none}
+
+.otherdistro{
+  border:1px dashed var(--line-dim);border-radius:8px;padding:10px 13px;margin:-8px 0 18px;
+  font-family:var(--mono);font-size:12px;line-height:1.6;color:var(--ink-dim);word-break:break-word;
+}
+.otherdistro b{color:var(--gold);font-family:var(--sans);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;display:block;margin-bottom:4px}
+
+.readout h2{font-size:11px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:var(--line);margin:0 0 9px}
+.explain{font-size:14.5px;line-height:1.7;color:var(--ink)}
+.explain + h2{margin-top:22px}
+.explain em{color:var(--trace);font-style:normal;font-family:var(--mono);font-size:13px}
+.explain .gold{color:var(--gold);font-family:var(--mono);font-size:13px}
+
+.caution{
+  margin-top:20px;border:1px solid var(--warn);border-radius:8px;padding:12px 14px;
+  font-size:13.5px;line-height:1.6;color:var(--warn);background:rgba(255,146,118,.06);
+}
+.caution b{letter-spacing:.15em;font-size:10px;text-transform:uppercase;display:block;margin-bottom:5px}
+
+.hint{margin-top:22px;font-size:12.5px;line-height:1.65;color:var(--ink-dim);border-top:1px dashed var(--line-dim);padding-top:14px}
+.hint kbd{font-family:var(--mono);font-size:10.5px;border:1px solid var(--line-dim);border-bottom-width:2px;border-radius:4px;padding:1px 5px;color:var(--ink);background:rgba(0,0,0,.4)}
+
+/* ---------- TERMINAL DECK ---------- */
+.deck{flex:0 0 var(--deckH);min-height:0;display:flex;flex-direction:column;background:#05070c;border-top:1px solid var(--line-dim)}
+.deck.collapsed{flex-basis:38px}
+.deck.collapsed .deck-body{display:none}
+.deck-head{
+  flex:0 0 auto;display:flex;align-items:center;gap:12px;padding:7px 14px;
+  border-bottom:1px solid var(--line-dim);font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-dim);
+}
+.deck-title{color:var(--line);font-weight:600}
+.statuspill{display:inline-flex;align-items:center;gap:6px;font-size:10px;padding:2px 9px;border:1px solid var(--line-dim);border-radius:20px}
+.statuspill[data-state="live"]{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 50%,transparent)}
+.statuspill[data-state="live"]::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 7px var(--ok)}
+.statuspill[data-state="offline"]{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 50%,transparent)}
+.statuspill[data-state="offline"]::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--warn)}
+.statuspill[data-state="connecting"]{color:var(--gold)}
+.statuspill[data-state="connecting"]::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--gold);animation:blink 1s steps(1) infinite}
+.autorun{display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--ink-dim);text-transform:none;letter-spacing:.04em;font-size:11px}
+.autorun input{accent-color:var(--trace)}
+.deck-btn{
+  background:none;border:1px solid var(--line-dim);border-radius:4px;color:var(--ink-dim);
+  font-family:var(--mono);font-size:10px;letter-spacing:.1em;padding:3px 9px;cursor:pointer;text-transform:uppercase;
+}
+.deck-btn:hover{border-color:var(--trace);color:var(--trace)}
+.deck-btn.spacer{margin-left:auto;border:none;pointer-events:none}
+
+.deck-body{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr 300px;gap:1px;background:var(--line-dim)}
+@media (max-width:920px){ .deck-body{grid-template-columns:1fr 1fr} .histpane{display:none} }
+@media (max-width:600px){ .deck-body{grid-template-columns:1fr;grid-auto-rows:minmax(160px,1fr);overflow-y:auto} }
+
+.termwrap{display:flex;flex-direction:column;min-height:0;min-width:0;background:#05070c;position:relative}
+.termwrap.active{box-shadow:inset 0 0 0 1px var(--trace)}
+.term-head{
+  flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:5px 11px;
+  border-bottom:1px solid var(--line-dim);font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--ink-dim);text-transform:uppercase;
+}
+.term-head .tdot{width:7px;height:7px;border-radius:50%;background:var(--line-dim)}
+.termwrap.active .term-head .tdot{background:var(--trace);box-shadow:0 0 7px var(--trace-glow)}
+.termwrap.active .term-head{color:var(--trace)}
+.term-head .tmeta{margin-left:auto;color:var(--ink-dim);text-transform:none;letter-spacing:0;font-size:10px;opacity:.8}
+.term-mount{flex:1;min-height:0;padding:4px 2px 2px 8px;overflow:hidden}
+.term-mount .xterm{height:100%}
+.term-offline{
+  position:absolute;inset:32px 0 0 0;display:flex;align-items:center;justify-content:center;text-align:center;padding:22px;
+  font-family:var(--mono);font-size:12px;line-height:1.7;color:var(--ink-dim);pointer-events:none;
+}
+.term-offline code{color:var(--gold);background:rgba(255,211,107,.08);padding:1px 6px;border-radius:4px}
+.termwrap.connected .term-offline{display:none}
+
+.histpane{display:flex;flex-direction:column;min-height:0;background:#070a10}
+.hist-head{
+  flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--line-dim);
+  font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--line);
+}
+.hist-head .count{color:var(--ink-dim)}
+.hist-head .clear{margin-left:auto;cursor:pointer;color:var(--ink-dim);border:1px solid var(--line-dim);border-radius:4px;padding:1px 7px}
+.hist-head .clear:hover{color:var(--trace);border-color:var(--trace)}
+.hist-list{flex:1;min-height:0;overflow-y:auto;padding:6px}
+.hist-empty{color:var(--ink-dim);font-family:var(--mono);font-size:11px;padding:14px;opacity:.6;line-height:1.6}
+.hist-item{
+  display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:baseline;
+  padding:6px 8px;border:1px solid transparent;border-radius:6px;cursor:pointer;margin-bottom:3px;
+}
+.hist-item:hover{border-color:var(--line-dim);background:rgba(255,255,255,.03)}
+.hist-item .badge{font-family:var(--mono);font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px;letter-spacing:.05em}
+.hist-item .badge.t1{color:var(--ok);border:1px solid color-mix(in srgb,var(--ok) 45%,transparent)}
+.hist-item .badge.t2{color:var(--gold);border:1px solid color-mix(in srgb,var(--gold) 45%,transparent)}
+.hist-item .cmd{font-family:var(--mono);font-size:11.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hist-item .time{font-family:var(--mono);font-size:9px;color:var(--ink-dim);grid-column:2;opacity:.6}
+
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--line-dim);border-radius:6px;border:2px solid var(--paper)}
+</style>
+</head>
+<body data-root="kubectl">
+<div class="horizon"><div class="ceiling"></div><div class="floor"></div><div class="glowline"></div></div>
+
+<div class="stack">
+  <div class="workbench">
+    <div class="app">
+      <div class="map-pane" id="mapPane" tabindex="0" aria-label="Command mind map. Arrow keys to navigate, Enter to select.">
+        <div class="map-legend">
+          <span><b id="legendTitle">KUBECTL ATLAS</b></span>
+          <span><span class="key">▲▼</span> move · <span class="key">▶</span> open · <span class="key">◀</span> back · <span class="key">↵</span> select &amp; send · <span class="key">esc</span> fold</span>
+        </div>
+        <div class="map-inner" id="mapInner">
+          <svg id="wires"></svg>
+          <div id="nodes"></div>
+        </div>
+      </div>
+      <div class="readout">
+        <div class="titleblock">
+          <h1 id="sheetTitle">Command Readout</h1>
+          <span class="rev"><b id="rootLabel">KUBECTL</b> · <span id="sheetNo">SHEET 1/4</span></span>
+        </div>
+        <div class="readout-body" id="readoutBody"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="vgutter" id="vgutter" title="Drag to resize · double-click to collapse"></div>
+
+  <div class="deck" id="deck">
+    <div class="deck-head">
+      <span class="deck-title">Terminal Deck</span>
+      <span class="statuspill" id="statusPill" data-state="offline">offline</span>
+      <span id="shellMeta" style="opacity:.7"></span>
+      <label class="autorun"><input type="checkbox" id="autorun"> auto-run sent commands</label>
+      <span class="deck-btn spacer"></span>
+      <button class="deck-btn" id="reconnectBtn">reconnect</button>
+      <button class="deck-btn" id="collapseBtn">collapse</button>
+    </div>
+    <div class="deck-body">
+      <div class="termwrap" data-term="1" id="wrap1">
+        <div class="term-head"><span class="tdot"></span>Term 1<span class="tmeta" id="meta1"></span></div>
+        <div class="term-mount" id="term1"></div>
+        <div class="term-offline">backend not connected.<br>start it with <code>npm start</code> and open the printed URL.</div>
+      </div>
+      <div class="termwrap" data-term="2" id="wrap2">
+        <div class="term-head"><span class="tdot"></span>Term 2<span class="tmeta" id="meta2"></span></div>
+        <div class="term-mount" id="term2"></div>
+        <div class="term-offline">second live shell on this host.</div>
+      </div>
+      <div class="histpane">
+        <div class="hist-head">History <span class="count" id="histCount">0</span><span class="clear" id="clearHist">clear</span></div>
+        <div class="hist-list" id="histList"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script>
+/* ═══════════ DATA — five roots. cmd is a string, or {u,r} (linux). ═══════════ */
+
+const KUBECTL = [
+{ id:"get", label:"get", blurb:"Lists resources — your first look at what exists and what state it's in.",
+  resources:[
+  { id:"pods", label:"pods", scenarios:[
+    { label:"in one namespace", cmd:"kubectl get pods -n production",
+      explain:"Lists every pod in the <em>production</em> namespace with name, containers ready, status (Running, Pending, CrashLoopBackOff…), restart count, and age. The everyday health check for one environment." },
+    { label:"across every namespace", cmd:"kubectl get pods -A",
+      explain:"Every pod in the cluster regardless of namespace, with a namespace column added. Useful when hunting for something you can't locate." },
+    { label:"with node + IP columns", cmd:"kubectl get pods -n production -o wide",
+      explain:"Adds the pod IP and which node it's on. Reach for it when a problem seems tied to a specific machine." },
+    { label:"only the broken ones", cmd:"kubectl get pods -A --field-selector status.phase!=Running",
+      explain:"Filters to anything not Running — a quick 'what's on fire' sweep. (Crash-looping pods still count as Running, so pair with a normal listing.)" },
+    { label:"matching a label", cmd:"kubectl get pods -n production -l app=web",
+      explain:"Only pods labeled <em>app=web</em> — exactly the pods behind one application." },
+    { label:"live, as they change", cmd:"kubectl get pods -n staging --watch",
+      explain:"Prints the list, then a new line each time a pod changes state. Perfect for watching a rollout. Ctrl-C stops." },
+  ]},
+  { id:"deployments", label:"deployments", scenarios:[
+    { label:"in one namespace", cmd:"kubectl get deployments -n production",
+      explain:"Replicas ready, up-to-date, available, plus age. If READY says 2/3, one replica is missing." },
+    { label:"full YAML of one", cmd:"kubectl get deployment api-gateway -n production -o yaml",
+      explain:"The complete live definition as YAML — the cluster's source of truth, which may differ from your repo." },
+  ]},
+  { id:"services", label:"services", scenarios:[
+    { label:"in one namespace", cmd:"kubectl get services -n production",
+      explain:"Type, cluster IP, external IP, ports — how you find where traffic to an app should point." },
+    { label:"with their endpoints", cmd:"kubectl get endpoints api-gateway -n production",
+      explain:"The actual pod IPs the service routes to. Empty means it matches no healthy pods — the classic 'deployed but unreachable'." },
+  ]},
+  { id:"namespaces", label:"namespaces", scenarios:[
+    { label:"list them all", cmd:"kubectl get namespaces",
+      explain:"Every namespace — default, kube-system, plus your own. The top-level folders everything lives inside." },
+    { label:"with their labels", cmd:"kubectl get namespaces --show-labels",
+      explain:"Namespace labels often drive policy — an environment=prod label may control network rules inside." },
+  ]},
+  { id:"nodes", label:"nodes", scenarios:[
+    { label:"list every node", cmd:"kubectl get nodes",
+      explain:"Status (Ready/NotReady), role, age, version. NotReady means workloads are being rescheduled." },
+    { label:"with OS + IP detail", cmd:"kubectl get nodes -o wide",
+      explain:"IPs, OS image, kernel, runtime — handy during upgrades to spot version drift." },
+  ]},
+  { id:"events", label:"events", scenarios:[
+    { label:"recent, newest last", cmd:"kubectl get events -n production --sort-by=.metadata.creationTimestamp",
+      explain:"Scheduling, image pulls, probe failures in order. When a pod misbehaves, this usually names the culprit." },
+    { label:"warnings only", cmd:"kubectl get events -A --field-selector type=Warning",
+      explain:"Failed scheduling, mounts, probes, pulls. Cuts routine noise to just the problems." },
+  ]},
+]},
+{ id:"describe", label:"describe", blurb:"Deep-dives one object: full config, current state, and recent events.",
+  resources:[
+  { id:"d-pod", label:"pod", scenarios:[
+    { label:"a stuck web pod", cmd:"kubectl describe pod nginx-web-7d4b9c8f-xk2p1 -n production",
+      explain:"Everything about the pod, and the Events section that narrates why it's Pending, crash-looping, or failing probes. The single most useful debugging command in kubectl." },
+    { label:"a database pod", cmd:"kubectl describe pod postgres-0 -n production",
+      explain:"Full detail on a StatefulSet pod. Check Volumes to confirm its PVC is bound — stateful pods most often stick on storage." },
+  ]},
+  { id:"d-deploy", label:"deployment", scenarios:[
+    { label:"the api-gateway app", cmd:"kubectl describe deployment api-gateway -n production",
+      explain:"Strategy, replicas, template, rollout conditions. If a rollout is stuck, Conditions and Events say why." },
+  ]},
+  { id:"d-node", label:"node", scenarios:[
+    { label:"one worker machine", cmd:"kubectl describe node worker-node-03",
+      explain:"Capacity vs requested, pressure conditions, taints, and every pod on it. Answers 'why won't anything schedule here?'" },
+  ]},
+]},
+{ id:"logs", label:"logs", blurb:"Streams what a container is printing — the application's own story.",
+  resources:[
+  { id:"l-pod", label:"pod", scenarios:[
+    { label:"follow live output", cmd:"kubectl logs -f nginx-web-7d4b9c8f-xk2p1 -n production",
+      explain:"Streams the pod's output live, like tail -f. Ctrl-C detaches without touching the pod." },
+    { label:"why it crashed last time", cmd:"kubectl logs nginx-web-7d4b9c8f-xk2p1 -n production --previous",
+      explain:"Logs from the previous, crashed container. In CrashLoopBackOff the dying words are in the previous instance." },
+    { label:"just the last 100 lines", cmd:"kubectl logs postgres-0 -n production --tail=100 --since=1h",
+      explain:"Recent lines only, from the past hour — keeps chatty apps from flooding your terminal." },
+    { label:"all pods behind one app", cmd:"kubectl logs -n production -l app=web --prefix",
+      explain:"Streams every pod labeled app=web at once, each line prefixed with its pod. Merges replicas into one view." },
+  ]},
+]},
+{ id:"exec", label:"exec", blurb:"Runs a command inside a live container — a remote shell into your workload.",
+  resources:[
+  { id:"e-pod", label:"pod", scenarios:[
+    { label:"open an interactive shell", cmd:"kubectl exec -it nginx-web-7d4b9c8f-xk2p1 -n production -- /bin/sh",
+      explain:"A live shell inside the container. Inspect files, test connectivity from the pod's view. exit leaves. (Minimal images may only have /bin/sh.)" },
+    { label:"check env vars", cmd:"kubectl exec nginx-web-7d4b9c8f-xk2p1 -n production -- env",
+      explain:"Prints exactly which env vars the app received — the fastest confirmation a ConfigMap or Secret was wired in." },
+  ]},
+]},
+{ id:"apply", label:"apply", blurb:"Makes the cluster match your YAML — the declarative way to create and update.",
+  resources:[
+  { id:"a-file", label:"manifest file", scenarios:[
+    { label:"apply one file", cmd:"kubectl apply -f deployment.yaml -n staging",
+      explain:"Create if absent, update in place if present. Idempotent — running twice is safe." },
+    { label:"preview without changing", cmd:"kubectl apply -f deployment.yaml -n production --dry-run=server",
+      explain:"Full server-side validation, nothing saved. Look before you leap into production." },
+    { label:"see the diff first", cmd:"kubectl diff -f deployment.yaml -n production",
+      explain:"Line-by-line diff of what apply would change. Catches surprises like a hot-fixed live object." },
+  ]},
+]},
+{ id:"delete", label:"delete", blurb:"Removes resources. Managed pods get recreated; everything else is gone.",
+  resources:[
+  { id:"del-pod", label:"pod", scenarios:[
+    { label:"restart by deletion", cmd:"kubectl delete pod nginx-web-7d4b9c8f-xk2p1 -n production",
+      explain:"Terminates the pod; its deployment recreates it. The standard way to give one misbehaving pod a clean restart.",
+      caution:"Only self-heals if a controller owns the pod. A bare pod is simply gone." },
+    { label:"force-kill a stuck pod", cmd:"kubectl delete pod postgres-0 -n production --grace-period=0 --force",
+      explain:"Removes a pod wedged in Terminating immediately.",
+      caution:"For stateful workloads this risks two instances on the same volume. Confirm the node is truly dead first." },
+  ]},
+  { id:"del-deploy", label:"deployment", scenarios:[
+    { label:"remove an app entirely", cmd:"kubectl delete deployment api-gateway -n staging",
+      explain:"Deletes the deployment, cascading to its pods. Services and configmaps survive.",
+      caution:"No undo. If the YAML isn't in version control, the config is lost." },
+  ]},
+]},
+{ id:"scale", label:"scale", blurb:"Changes how many replicas of a workload run.",
+  resources:[
+  { id:"s-deploy", label:"deployment", scenarios:[
+    { label:"scale up for load", cmd:"kubectl scale deployment api-gateway -n production --replicas=10",
+      explain:"Runs 10 copies; new pods appear in seconds and the service spreads traffic across them." },
+    { label:"scale to zero (pause)", cmd:"kubectl scale deployment batch-worker -n staging --replicas=0",
+      explain:"Terminates every pod but keeps the deployment — paused, not deleted.",
+      caution:"If an HPA manages it, it may scale right back up." },
+  ]},
+]},
+{ id:"rollout", label:"rollout", blurb:"Manages deployment updates: restart, watch, and roll back.",
+  resources:[
+  { id:"r-deploy", label:"deployment", scenarios:[
+    { label:"rolling restart", cmd:"kubectl rollout restart deployment api-gateway -n production",
+      explain:"Replaces pods a batch at a time, staying available. The go-to after changing a ConfigMap or Secret." },
+    { label:"watch a rollout finish", cmd:"kubectl rollout status deployment api-gateway -n production",
+      explain:"Blocks until the rollout completes, then exits. CI/CD uses its exit code to know a deploy landed." },
+    { label:"undo a bad deploy", cmd:"kubectl rollout undo deployment api-gateway -n production",
+      explain:"Rolls back to the previous revision — the fastest recovery when a new version errors." },
+  ]},
+]},
+{ id:"top", label:"top", blurb:"Live CPU and memory usage, from the metrics server.",
+  resources:[
+  { id:"t-pods", label:"pods", scenarios:[
+    { label:"hungriest pods first", cmd:"kubectl top pods -n production --sort-by=memory",
+      explain:"CPU and memory per pod, biggest memory users on top. The quickest way to spot a leak." },
+  ]},
+  { id:"t-nodes", label:"nodes", scenarios:[
+    { label:"cluster capacity at a glance", cmd:"kubectl top nodes",
+      explain:"Each node's usage as a percentage of capacity. Hot nodes explain evictions and Pending pods." },
+  ]},
+]},
+{ id:"pf", label:"port-forward", blurb:"Tunnels a local port to a pod or service inside the cluster.",
+  resources:[
+  { id:"pf-svc", label:"service", scenarios:[
+    { label:"open an internal dashboard", cmd:"kubectl port-forward svc/grafana -n monitoring 3000:3000",
+      explain:"A private tunnel from localhost:3000 to the grafana service — use the dashboard without exposing it." },
+  ]},
+  { id:"pf-pod", label:"pod", scenarios:[
+    { label:"poke a database locally", cmd:"kubectl port-forward pod/postgres-0 -n production 5432:5432",
+      explain:"Local psql reaches the pod as if the database were on your machine.",
+      caution:"You are talking to the production database. Prefer a read-only account." },
+  ]},
+]},
+{ id:"drain", label:"cordon / drain", blurb:"Safely empties a node for maintenance.",
+  resources:[
+  { id:"dr-node", label:"node", scenarios:[
+    { label:"stop new pods landing", cmd:"kubectl cordon worker-node-03",
+      explain:"Marks the node unschedulable: existing pods run on, no new ones land. The gentle first step." },
+    { label:"evacuate for maintenance", cmd:"kubectl drain worker-node-03 --ignore-daemonsets --delete-emptydir-data",
+      explain:"Evicts every pod so controllers recreate them elsewhere. Then the machine is safe to reboot.",
+      caution:"emptyDir data is lost and single-replica apps blip. Check what's there first." },
+    { label:"return node to service", cmd:"kubectl uncordon worker-node-03",
+      explain:"Removes the unschedulable mark. New and rescheduled pods start using it again." },
+  ]},
+]},
+{ id:"config", label:"config", blurb:"Manages your kubeconfig: which clusters, users, and contexts kubectl talks to.",
+  resources:[
+  { id:"cfg-ctx", label:"contexts", scenarios:[
+    { label:"list all contexts", cmd:"kubectl config get-contexts",
+      explain:"Every cluster/user/namespace combo you can switch between, with a * on the current one. Check here before running anything destructive." },
+    { label:"which context am I on?", cmd:"kubectl config current-context",
+      explain:"Prints just the active context name. The one-line safety check before you touch production." },
+    { label:"switch to another cluster", cmd:"kubectl config use-context prod-cluster",
+      explain:"Points kubectl at a different cluster/user. Every command after this targets the new context." },
+    { label:"set a default namespace", cmd:"kubectl config set-context --current --namespace=production",
+      explain:"Pins the current context to a namespace so you can drop -n from every command." },
+  ]},
+  { id:"cfg-view", label:"kubeconfig", scenarios:[
+    { label:"view the merged config", cmd:"kubectl config view",
+      explain:"The effective kubeconfig from all merged files, with secrets redacted. How you confirm which clusters are defined." },
+  ]},
+]},
+{ id:"create", label:"create", blurb:"Imperatively makes resources — quick objects and the secrets/configmaps apply can't easily inline.",
+  resources:[
+  { id:"cr-ns", label:"namespace", scenarios:[
+    { label:"a new namespace", cmd:"kubectl create namespace staging",
+      explain:"Creates the namespace immediately. Errors if it already exists, unlike apply." },
+  ]},
+  { id:"cr-cm", label:"configmap", scenarios:[
+    { label:"from literal values", cmd:"kubectl create configmap app-config --from-literal=LOG_LEVEL=info --from-literal=REGION=us-east -n production",
+      explain:"Builds a ConfigMap inline from key=value pairs. Mount or env it into pods that need non-secret settings." },
+    { label:"from a file", cmd:"kubectl create configmap nginx-conf --from-file=./nginx.conf -n production",
+      explain:"Turns a whole file into a ConfigMap keyed by filename — the usual way to inject a config file." },
+  ]},
+  { id:"cr-secret", label:"secret", scenarios:[
+    { label:"a generic secret", cmd:"kubectl create secret generic db-creds --from-literal=username=app --from-literal=password=s3cr3t -n production",
+      explain:"Stores sensitive key/values, base64-encoded, for use as env or a mounted file.",
+      caution:"The value lands in shell history and etcd. Base64 is not encryption — tighten RBAC and consider a secrets manager." },
+    { label:"a registry pull secret", cmd:"kubectl create secret docker-registry regcred --docker-server=registry.corp.local --docker-username=ci --docker-password=$TOKEN -n production",
+      explain:"The credential a pod's imagePullSecrets points at to pull from a private registry." },
+  ]},
+]},
+{ id:"edit", label:"edit", blurb:"Opens a live resource in your editor and applies changes on save — fast fixes without a manifest.",
+  resources:[
+  { id:"ed-deploy", label:"deployment", scenarios:[
+    { label:"edit a deployment live", cmd:"kubectl edit deployment api-gateway -n production",
+      explain:"Pulls the live YAML into $EDITOR; saving applies it. Great for a quick change, but the edit isn't in git.",
+      caution:"Out-of-band edits drift from your manifests. Fold anything lasting back into version control." },
+    { label:"edit a configmap", cmd:"kubectl edit configmap app-config -n production",
+      explain:"Tweak config values in place. Pods won't pick up changes until they restart (rollout restart)." },
+  ]},
+]},
+{ id:"set", label:"set", blurb:"Changes one field on a workload without editing the whole object — image, env, or resources.",
+  resources:[
+  { id:"st-image", label:"image", scenarios:[
+    { label:"roll out a new image", cmd:"kubectl set image deployment/api-gateway api=myapp:2.4.2 -n production",
+      explain:"Updates the container image and triggers a rolling update. The imperative sibling of editing the tag in YAML." },
+  ]},
+  { id:"st-env", label:"env", scenarios:[
+    { label:"add or change an env var", cmd:"kubectl set env deployment/api-gateway LOG_LEVEL=debug -n production",
+      explain:"Sets an environment variable and rolls the pods. Quick way to flip a flag for debugging." },
+  ]},
+  { id:"st-res", label:"resources", scenarios:[
+    { label:"set requests and limits", cmd:"kubectl set resources deployment/api-gateway --requests=cpu=200m,memory=256Mi --limits=cpu=1,memory=512Mi -n production",
+      explain:"Adjusts the scheduler's reservations and the hard caps in one shot, triggering a rollout." },
+  ]},
+]},
+{ id:"patch", label:"patch", blurb:"Surgically updates specific fields via a merge patch — ideal for scripts and one-liners.",
+  resources:[
+  { id:"pt-deploy", label:"deployment", scenarios:[
+    { label:"change fields with a merge patch", cmd:"kubectl patch deployment api-gateway -n production -p '{\"spec\":{\"replicas\":5}}'",
+      explain:"Merges just the given fields into the live object. Scriptable and idempotent where edit isn't." },
+    { label:"pause a rollout", cmd:"kubectl patch deployment api-gateway -n production -p '{\"spec\":{\"paused\":true}}'",
+      explain:"Freezes further rollout so you can batch several changes, then unpause to apply them together." },
+  ]},
+]},
+{ id:"label", label:"label / annotate", blurb:"Attaches or changes the metadata that selectors, policies, and tooling key off.",
+  resources:[
+  { id:"lb-label", label:"labels", scenarios:[
+    { label:"label a node", cmd:"kubectl label node worker-node-03 disktype=ssd",
+      explain:"Adds a label pods can target with nodeSelector/affinity — e.g. steer I/O-heavy work onto SSD nodes." },
+    { label:"overwrite an existing label", cmd:"kubectl label pod nginx-web-7d4b9c8f-xk2p1 -n production tier=frontend --overwrite",
+      explain:"A plain label set won't change an existing key; --overwrite is required to replace one." },
+  ]},
+  { id:"lb-anno", label:"annotations", scenarios:[
+    { label:"annotate a resource", cmd:"kubectl annotate deployment api-gateway -n production kubernetes.io/change-cause=\"rollback to 2.4.1\"",
+      explain:"Annotations hold non-identifying metadata — here the change-cause that shows up in rollout history." },
+  ]},
+]},
+{ id:"cp", label:"cp", blurb:"Copies files between your machine and a container — pull logs out, push a fix in.",
+  resources:[
+  { id:"cp-file", label:"files", scenarios:[
+    { label:"pull a file out of a pod", cmd:"kubectl cp production/postgres-0:/var/lib/postgresql/dump.sql ./dump.sql",
+      explain:"Copies container → local. The path is namespace/pod:remote-path, and the container needs tar." },
+    { label:"push a file into a pod", cmd:"kubectl cp ./patch.conf production/nginx-web-7d4b9c8f-xk2p1:/etc/nginx/patch.conf",
+      explain:"Copies a local file in — handy for a one-off config test.",
+      caution:"Changes vanish when the pod restarts. Bake anything permanent into the image or a ConfigMap." },
+  ]},
+]},
+{ id:"auth", label:"auth can-i", blurb:"Checks RBAC — what you (or a service account) are actually allowed to do.",
+  resources:[
+  { id:"au-cani", label:"permissions", scenarios:[
+    { label:"can I do this?", cmd:"kubectl auth can-i delete pods -n production",
+      explain:"Answers yes/no for your current user. The fastest way to confirm a permission before hitting a wall." },
+    { label:"check as a service account", cmd:"kubectl auth can-i list secrets -n production --as=system:serviceaccount:production:api",
+      explain:"Impersonates a service account to verify what a workload's identity can reach. Key for least-privilege audits." },
+    { label:"everything I can do here", cmd:"kubectl auth can-i --list -n production",
+      explain:"Dumps the full matrix of verbs and resources you're allowed in the namespace." },
+  ]},
+]},
+{ id:"explain", label:"explain", blurb:"Built-in schema docs — every field of every resource, straight from the API server.",
+  resources:[
+  { id:"ex-field", label:"schema", scenarios:[
+    { label:"fields of a resource", cmd:"kubectl explain deployment.spec.strategy",
+      explain:"Describes a field and its children with types and docs. Beats guessing YAML keys from memory." },
+    { label:"the whole tree at once", cmd:"kubectl explain pod --recursive",
+      explain:"Prints the entire nested field structure — a map of everything a pod spec can contain." },
+  ]},
+]},
+{ id:"api", label:"api-resources", blurb:"Discovery: what kinds of objects this cluster knows about, including CRDs.",
+  resources:[
+  { id:"ap-list", label:"resource types", scenarios:[
+    { label:"list every resource type", cmd:"kubectl api-resources",
+      explain:"Name, short name, API group, and whether it's namespaced — for all built-ins and installed CRDs." },
+    { label:"namespaced types only", cmd:"kubectl api-resources --namespaced=true",
+      explain:"Filters to objects that live inside a namespace, hiding cluster-scoped ones like nodes and PVs." },
+  ]},
+]},
+{ id:"cluster", label:"cluster-info", blurb:"High-level health and endpoints of the control plane.",
+  resources:[
+  { id:"ci-info", label:"control plane", scenarios:[
+    { label:"where's the API server?", cmd:"kubectl cluster-info",
+      explain:"Prints the API server and core add-on URLs. A quick 'am I even pointed at a live cluster?' check." },
+    { label:"dump everything for a bug report", cmd:"kubectl cluster-info dump --output-directory=./cluster-dump",
+      explain:"Writes node and namespace state plus logs to disk — the artifact to attach when escalating a cluster problem." },
+  ]},
+]},
+{ id:"debug", label:"debug", blurb:"Attaches an ephemeral debug container or a node shell — troubleshoot images too minimal for exec.",
+  resources:[
+  { id:"db-pod", label:"pod", scenarios:[
+    { label:"add tools to a running pod", cmd:"kubectl debug -it nginx-web-7d4b9c8f-xk2p1 --image=busybox:1.36 --target=nginx -n production",
+      explain:"Injects an ephemeral container sharing the target's process namespace — get a shell and tools into a distroless pod without rebuilding." },
+    { label:"clone a pod with a debug image", cmd:"kubectl debug nginx-web-7d4b9c8f-xk2p1 -it --copy-to=nginx-debug --image=ubuntu:24.04 -n production",
+      explain:"Copies the pod with a fatter image so you can poke at a reproduction without disturbing the live one." },
+  ]},
+  { id:"db-node", label:"node", scenarios:[
+    { label:"get a shell on a node", cmd:"kubectl debug node/worker-node-03 -it --image=busybox:1.36",
+      explain:"Launches a privileged pod with the node's filesystem mounted — inspect a host without SSHing in.",
+      caution:"This is effectively root on the node. Use sparingly and delete the debug pod afterward." },
+  ]},
+]},
+];
+
+const DOCKER = [
+{ id:"run", label:"run", blurb:"Creates and starts a new container from an image — the beginning of everything.",
+  resources:[
+  { id:"run-c", label:"container", scenarios:[
+    { label:"web server in the background", cmd:"docker run -d --name web-frontend -p 8080:80 nginx:1.27",
+      explain:"Starts nginx detached, publishing container port 80 to host 8080. Browse localhost:8080. The name saves ID lookups later." },
+    { label:"throwaway interactive shell", cmd:"docker run --rm -it ubuntu:24.04 /bin/bash",
+      explain:"A fresh Ubuntu with a bash shell; --rm deletes it on exit. A clean sandbox in two seconds." },
+    { label:"database with a volume", cmd:"docker run -d --name postgres-db -e POSTGRES_PASSWORD=secret -v pgdata:/var/lib/postgresql/data -p 5432:5432 postgres:16",
+      explain:"Password via env var, data in the named volume pgdata. Recreate the container without losing a row." },
+    { label:"mount your code for live dev", cmd:"docker run -d --name api-server -v $(pwd):/app -w /app -p 3000:3000 node:22 npm start",
+      explain:"Your directory mounted in and made the workdir. Edit locally, the container sees it — the dev loop without rebuilding." },
+    { label:"resource-capped container", cmd:"docker run -d --name redis-cache --memory=512m --cpus=1.5 redis:7",
+      explain:"Redis fenced to 512 MB and 1.5 cores. Exceed memory and the kernel kills it before it starves the host." },
+    { label:"auto-restart on failure", cmd:"docker run -d --name api-server --restart unless-stopped myapp:2.4.1",
+      explain:"Crashes and reboots bring it back; only a deliberate stop keeps it down. Minimum self-healing on one host." },
+  ]},
+]},
+{ id:"ps", label:"ps", blurb:"Lists containers — the roll call of what's running (and what sank).",
+  resources:[
+  { id:"ps-c", label:"containers", scenarios:[
+    { label:"what's running now", cmd:"docker ps",
+      explain:"Every running container: ID, image, command, uptime, ports, name. The docker command you'll type most." },
+    { label:"including stopped ones", cmd:"docker ps -a",
+      explain:"Adds stopped containers. Exited (0) finished clean, (1)+ crashed, (137) was killed — often by the OOM killer." },
+    { label:"just IDs, for scripting", cmd:"docker ps -aq",
+      explain:"Only IDs, one per line. Piped into docker rm $(docker ps -aq) it drives bulk operations." },
+    { label:"filter by name or status", cmd:"docker ps -a --filter name=api --filter status=exited",
+      explain:"'Show me my crashed API containers.' Filters stack across image, label, network, health." },
+  ]},
+]},
+{ id:"dlogs", label:"logs", blurb:"Reads what a container has printed — the application's own account.",
+  resources:[
+  { id:"lg-c", label:"container", scenarios:[
+    { label:"follow live output", cmd:"docker logs -f web-frontend",
+      explain:"Streams output live. Ctrl-C detaches without touching the container." },
+    { label:"last 100 lines, timestamped", cmd:"docker logs --tail=100 -t api-server",
+      explain:"Recent lines, each timestamped — vital when correlating with an alert or another clock." },
+    { label:"a crashed container's story", cmd:"docker logs web-frontend 2>&1 | tail -50",
+      explain:"Logs survive a crash until removal. Grabs the last 50 lines including stderr, where the fatal error usually landed." },
+  ]},
+]},
+{ id:"dexec", label:"exec", blurb:"Runs a command inside a container that's already running.",
+  resources:[
+  { id:"ex-c", label:"container", scenarios:[
+    { label:"open a shell inside", cmd:"docker exec -it web-frontend /bin/sh",
+      explain:"A live shell inside the running container. exit leaves; the container runs on." },
+    { label:"query the database directly", cmd:"docker exec -it postgres-db psql -U postgres",
+      explain:"psql inside the DB container, already connected. No client install, no exposed port." },
+    { label:"check env vars received", cmd:"docker exec api-server env",
+      explain:"Exactly which env vars the process got. Settles 'did my -e flag take effect?'" },
+  ]},
+]},
+{ id:"images", label:"images / build", blurb:"The image library, and turning Dockerfiles into new entries.",
+  resources:[
+  { id:"im-i", label:"images", scenarios:[
+    { label:"list local images", cmd:"docker images",
+      explain:"Repository, tag, ID, age, size. A 'small app' on a 1.2 GB base is a common find and the first fix." },
+    { label:"remove dangling layers", cmd:"docker image prune",
+      explain:"Deletes untagged rebuild leftovers — the <none> rows. Asks for confirmation." },
+  ]},
+  { id:"b-i", label:"build", scenarios:[
+    { label:"build and tag", cmd:"docker build -t myapp:2.4.1 .",
+      explain:"Reads the Dockerfile (the . is the build context) into a tagged image. Each instruction is a cached layer." },
+    { label:"force a clean rebuild", cmd:"docker build --no-cache -t myapp:2.4.1 .",
+      explain:"Rebuilds every layer — for when a cached step hides stale content." },
+  ]},
+  { id:"pp-i", label:"pull / push", scenarios:[
+    { label:"pull a specific version", cmd:"docker pull nginx:1.27",
+      explain:"Pin the tag: bare nginx means :latest, a moving target." },
+    { label:"tag then push to registry", cmd:"docker tag myapp:2.4.1 registry.corp.local/team/myapp:2.4.1 && docker push registry.corp.local/team/myapp:2.4.1",
+      explain:"Tagging adds a registry-prefixed name; push uploads it layer by layer. How an image joins the fleet." },
+  ]},
+]},
+{ id:"stoprm", label:"stop / rm", blurb:"Halts and removes containers.",
+  resources:[
+  { id:"sr-c", label:"container", scenarios:[
+    { label:"graceful stop", cmd:"docker stop web-frontend",
+      explain:"SIGTERM, then SIGKILL after 10s. Remains on disk, restartable with docker start." },
+    { label:"force-remove a running one", cmd:"docker rm -f api-server",
+      explain:"Kills and removes in one motion — no graceful shutdown.",
+      caution:"No chance to flush data. Fine for stateless; risky for anything holding writes." },
+    { label:"clear all stopped containers", cmd:"docker container prune",
+      explain:"Removes every stopped container, reclaiming disk. Asks first.",
+      caution:"Their logs and writable layers go too. Read crash logs before pruning." },
+  ]},
+]},
+{ id:"inspect", label:"inspect", blurb:"Dumps the complete JSON record of any object — the full truth.",
+  resources:[
+  { id:"in-c", label:"container", scenarios:[
+    { label:"everything about a container", cmd:"docker inspect web-frontend",
+      explain:"The full JSON: image, env, mounts, network, restart policy, health. When a summary isn't enough." },
+    { label:"why did it die?", cmd:"docker inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}} {{.State.Error}}' api-server",
+      explain:"Exit code, whether the OOM killer took it (true = raise the memory limit), and any runtime error. Forensics before restart loses the evidence." },
+  ]},
+]},
+{ id:"network", label:"network / volume", blurb:"The networks containers talk over, and the volumes where data outlives them.",
+  resources:[
+  { id:"nw-n", label:"networks", scenarios:[
+    { label:"create an app network", cmd:"docker network create app-net",
+      explain:"Members get automatic DNS: postgres-db is reachable at that hostname. Why you always make a network for multi-container apps." },
+    { label:"who's on this network?", cmd:"docker network inspect app-net -f '{{range .Containers}}{{.Name}} {{end}}'",
+      explain:"Names every attached container. When two can't talk, 'same network?' is answered in one line." },
+  ]},
+  { id:"vl-v", label:"volumes", scenarios:[
+    { label:"where does it live on disk?", cmd:"docker volume inspect pgdata",
+      explain:"Shows the Mountpoint — the host directory holding the bytes. For backups, or confirming contents." },
+    { label:"remove unused volumes", cmd:"docker volume prune",
+      explain:"Deletes volumes attached to nothing — often gigabytes of forgotten data.",
+      caution:"Permanent. A volume from a removed database counts as 'unused'. Know the list first." },
+  ]},
+]},
+{ id:"compose", label:"compose", blurb:"Runs multi-container applications defined in one YAML file.",
+  resources:[
+  { id:"cp-s", label:"stack", scenarios:[
+    { label:"bring the whole stack up", cmd:"docker compose up -d",
+      explain:"Starts every service in order on a shared network, detached. One file, one command, whole app." },
+    { label:"rebuild after code changes", cmd:"docker compose up -d --build",
+      explain:"Rebuilds local images, recreates only what changed. The everyday inner loop." },
+    { label:"tear it all down", cmd:"docker compose down",
+      explain:"Removes containers and network, leaving named volumes intact.",
+      caution:"Adding -v deletes the volumes too — database contents included. No confirmation." },
+  ]},
+]},
+{ id:"stats", label:"stats / system", blurb:"Live resource usage and host-level housekeeping.",
+  resources:[
+  { id:"st-c", label:"live usage", scenarios:[
+    { label:"live CPU / memory", cmd:"docker stats",
+      explain:"An auto-refreshing table of every container's CPU, memory vs limit, I/O — top, but for containers." },
+  ]},
+  { id:"st-h", label:"host disk", scenarios:[
+    { label:"what's using the disk?", cmd:"docker system df",
+      explain:"Footprint by category and how much is reclaimable. Run before pruning so you know where space went." },
+    { label:"reclaim everything unused", cmd:"docker system prune -a",
+      explain:"Stopped containers, unused networks, unreferenced images, build cache. Frees tens of gigabytes.",
+      caution:"With -a, any image not used by a running container is deleted — keepers included. Volumes only go with --volumes." },
+  ]},
+]},
+];
+
+const LINUX = [
+{ id:"pkg", tag:"SYS 01", label:"packages", diff:true, blurb:"The biggest Ubuntu/RHEL divide: APT and .deb versus DNF and .rpm. RHEL equivalents appear below each command.",
+  resources:[
+  { id:"pkg-mgr", label:"package manager", scenarios:[
+    { label:"update the whole system", cmd:{u:"sudo apt update && sudo apt upgrade -y", r:"sudo dnf upgrade -y"},
+      explain:"Ubuntu is two steps — refresh the index, then apply; DNF refreshes metadata automatically. Routine hygiene." },
+    { label:"install a package", cmd:{u:"sudo apt install nginx", r:"sudo dnf install nginx"},
+      explain:"Installs plus dependencies. Add -y to skip confirmation in scripts." },
+    { label:"which package owns this file?", cmd:{u:"dpkg -S /usr/bin/python3", r:"rpm -qf /usr/bin/python3"},
+      explain:"Reverse lookup via the low-level tool on each side — dpkg under APT, rpm under DNF." },
+    { label:"enable the extra repo", cmd:{u:"sudo add-apt-repository universe", r:"sudo dnf install epel-release"},
+      explain:"Unlocks the community universe — Ubuntu's universe, RHEL's EPEL. Fixes most 'no match' installs." },
+  ]},
+]},
+{ id:"files", tag:"SYS 02", label:"files & perms", blurb:"Filesystem navigation, manipulation, and the permission model — identical on every distro.",
+  resources:[
+  { id:"fl-nav", label:"navigate & copy", scenarios:[
+    { label:"list with sizes, newest last", cmd:"ls -lhtr",
+      explain:"Long, human sizes, sorted by time reversed — the newest files land at the bottom where your eye is." },
+    { label:"copy a dir, preserving all", cmd:"cp -a /etc/nginx /etc/nginx.bak",
+      explain:"Archive mode: permissions, ownership, timestamps, symlinks. The right way to back up a config dir before editing." },
+    { label:"delete safely-ish", cmd:"rm -rI ./build",
+      explain:"Recursive, but capital -I asks once before proceeding — a seatbelt without per-file nagging.",
+      caution:"rm -rf has no undo. Triple-check the path, especially that a variable in it isn't empty." },
+  ]},
+  { id:"pm-mode", label:"chmod / sudo", scenarios:[
+    { label:"make a script executable", cmd:"chmod +x deploy.sh",
+      explain:"Adds the execute bit. The fix for 'Permission denied' on a script you just wrote." },
+    { label:"lock down an SSH key", cmd:"chmod 600 ~/.ssh/id_ed25519",
+      explain:"Owner-only read/write. SSH refuses a key with looser permissions — 600 is mandatory." },
+    { label:"edit sudoers safely", cmd:"sudo visudo",
+      explain:"Syntax-checks before saving — because a broken sudoers locks everyone out of root.",
+      caution:"Never edit /etc/sudoers with a plain editor. One typo disables sudo machine-wide." },
+  ]},
+]},
+{ id:"users", tag:"SYS 03", label:"users & groups", diff:true, blurb:"Shared tools, a friendlier Ubuntu front-end, and a differently-named admin group.",
+  resources:[
+  { id:"us-mgmt", label:"accounts", scenarios:[
+    { label:"create a user with a home", cmd:{u:"sudo adduser deploy", r:"sudo useradd -m deploy && sudo passwd deploy"},
+      explain:"Ubuntu's adduser is interactive; RHEL uses useradd -m plus a separate passwd." },
+    { label:"grant admin rights", cmd:{u:"sudo usermod -aG sudo deploy", r:"sudo usermod -aG wheel deploy"},
+      explain:"Append (-aG — the a matters) to the admin group: sudo on Ubuntu, wheel on RHEL. Applies at next login." },
+    { label:"who am I, what groups?", cmd:"id",
+      explain:"UID, GID, and groups in this session. A missing new group? Log out and back in." },
+  ]},
+]},
+{ id:"proc", tag:"SYS 04", label:"processes", blurb:"Seeing what's running, and stopping what shouldn't be.",
+  resources:[
+  { id:"pr-view", label:"inspect & control", scenarios:[
+    { label:"find a process by name", cmd:"ps aux | grep -i nginx",
+      explain:"Owner, PID, CPU/memory, full command line — usually all you need to decide what's next." },
+    { label:"who's using port 8080?", cmd:"sudo ss -tlnp | grep 8080",
+      explain:"Names the PID squatting on your port — the modern answer to 'address already in use'." },
+    { label:"kill every match by name", cmd:"pkill -f runaway_script.py",
+      explain:"SIGTERM to every process whose command line matches. Perfect for a script that spawned copies.",
+      caution:"Patterns over-match. Preview with pgrep -af first." },
+  ]},
+]},
+{ id:"svc", tag:"SYS 05", label:"services & logs", blurb:"systemd runs services; journald keeps their diaries. Identical on both distros.",
+  resources:[
+  { id:"sv-ctl", label:"systemctl", scenarios:[
+    { label:"status of a service", cmd:"systemctl status nginx",
+      explain:"Running or dead, since when, main PID, and the last log lines. Start here when a service misbehaves." },
+    { label:"start on every boot", cmd:"sudo systemctl enable --now nginx",
+      explain:"Enables at boot AND starts now. 'It worked until we rebooted' is a missing enable." },
+    { label:"list what's failed", cmd:"systemctl --failed",
+      explain:"Every failed unit. After a reboot this is triage — a healthy box returns nothing." },
+  ]},
+  { id:"sv-logs", label:"journalctl", scenarios:[
+    { label:"follow a service's log", cmd:"journalctl -u nginx -f",
+      explain:"One service's journal streamed live — tail -f for systemd." },
+    { label:"errors since last boot", cmd:"journalctl -b -p err",
+      explain:"Error priority or worse since this boot. Cuts the firehose to what indicates trouble." },
+    { label:"why was the OOM killer here?", cmd:"journalctl -k | grep -i 'out of memory'",
+      explain:"When a process vanished, the OOM killer is prime suspect — and it leaves a note naming its victim." },
+  ]},
+]},
+{ id:"net", tag:"SYS 06", label:"network & firewall", diff:true, blurb:"Inspection is shared; persistent config and firewall diverge — netplan+ufw vs nmcli+firewalld.",
+  resources:[
+  { id:"nt-inspect", label:"inspect", scenarios:[
+    { label:"my IP addresses", cmd:"ip -br addr",
+      explain:"One clean line per interface — the modern replacement for ifconfig." },
+    { label:"DNS resolving correctly?", cmd:"dig api.internal.corp +short",
+      explain:"Confirms a name resolves to the address you expect — eliminates half of 'can't connect'." },
+    { label:"what's listening?", cmd:"sudo ss -tulnp",
+      explain:"Every listening socket with its process — the audit for 'what have I exposed?'" },
+  ]},
+  { id:"fw-rules", label:"firewall", scenarios:[
+    { label:"see current rules", cmd:{u:"sudo ufw status verbose", r:"sudo firewall-cmd --list-all"},
+      explain:"The active rule set. Always look before you change." },
+    { label:"allow SSH + web", cmd:{u:"sudo ufw allow OpenSSH && sudo ufw allow 80,443/tcp", r:"sudo firewall-cmd --permanent --add-service=ssh --add-service={http,https} && sudo firewall-cmd --reload"},
+      explain:"firewalld's model: --permanent writes config, --reload makes it live. ufw rules are live and persistent at once." },
+    { label:"turn it on", cmd:{u:"sudo ufw enable", r:"sudo systemctl enable --now firewalld"},
+      explain:"ufw ships disabled; firewalld is usually already running.",
+      caution:"Enabling over SSH without an SSH allow rule is the classic self-lockout. Add the rule first." },
+  ]},
+]},
+{ id:"disk", tag:"SYS 07", label:"disks & storage", blurb:"Where the space went, what's mounted, and how to attach more.",
+  resources:[
+  { id:"dk-space", label:"space & mounts", scenarios:[
+    { label:"free space per filesystem", cmd:"df -hT",
+      explain:"First command when anything says 'no space left' — a full /var can break things while / looks fine." },
+    { label:"what's eating this dir?", cmd:"sudo du -xh --max-depth=1 /var | sort -h",
+      explain:"Sizes each subdir; the culprit lands at the bottom. Descend and repeat. Usually logs or docker." },
+    { label:"make a mount survive reboot", cmd:"echo \"UUID=$(sudo blkid -s UUID -o value /dev/sdb1) /data xfs defaults,nofail 0 2\" | sudo tee -a /etc/fstab && sudo mount -a",
+      explain:"An fstab entry keyed by UUID, tested with mount -a. nofail means a missing disk won't hang boot.",
+      caution:"A malformed fstab line drops the box into emergency mode on boot. Test with mount -a first." },
+  ]},
+]},
+{ id:"remote", tag:"SYS 08", label:"ssh & transfer", blurb:"Getting onto other machines and moving files between them.",
+  resources:[
+  { id:"rm-ssh", label:"ssh", scenarios:[
+    { label:"generate a modern key", cmd:"ssh-keygen -t ed25519 -C \"daemon@workstation\"",
+      explain:"Ed25519 — small, fast, strong. The comment labels the key in authorized_keys years later." },
+    { label:"install your key on a server", cmd:"ssh-copy-id deploy@10.0.20.50",
+      explain:"Appends your public key with correct permissions, using your password one final time." },
+    { label:"tunnel a remote port", cmd:"ssh -N -L 5432:localhost:5432 deploy@db-server",
+      explain:"Local psql reaches a database never exposed to the network." },
+    { label:"jump through a bastion", cmd:"ssh -J bastion.corp.local deploy@10.0.20.50",
+      explain:"Tunnels via a jump host in one command. Put it in ~/.ssh/config as ProxyJump and forget it." },
+  ]},
+  { id:"rm-xfer", label:"rsync", scenarios:[
+    { label:"sync a directory, resumable", cmd:"rsync -avz --progress ./site/ deploy@10.0.20.50:/var/www/site/",
+      explain:"Transfers only changes; interrupted runs resume. Mind trailing slashes: site/ is 'contents of'." },
+    { label:"dry-run before --delete", cmd:"rsync -avn --delete ./site/ deploy@web01:/var/www/site/",
+      explain:"-n shows what would transfer and what would be removed, without doing it.",
+      caution:"--delete with the wrong destination erases the wrong directory. The dry run is your parachute." },
+  ]},
+]},
+{ id:"search", tag:"SYS 09", label:"search & text", blurb:"grep, find, sed, awk, jq — finding things and reshaping streams.",
+  resources:[
+  { id:"sr-find", label:"find things", scenarios:[
+    { label:"text inside files, recursively", cmd:"grep -rn --include='*.conf' 'proxy_pass' /etc/nginx/",
+      explain:"File and line number for every match. The 'where is this configured?' command." },
+    { label:"active config only", cmd:"grep -v -e '^#' -e '^$' /etc/ssh/sshd_config",
+      explain:"Hides comments and blanks — a 120-line config collapses to the settings in effect." },
+    { label:"big files, recently changed", cmd:"sudo find /var -size +100M -mtime -2 -exec ls -lh {} +",
+      explain:"Files over 100 MB changed in 2 days — the profile of a log that just exploded." },
+  ]},
+  { id:"sr-text", label:"reshape text", scenarios:[
+    { label:"replace with backup", cmd:"sed -i.bak 's/10.0.20.50/10.0.20.51/g' app.conf",
+      explain:"In-place, saving the original as .bak — a suffix that has saved countless configs from a bad regex." },
+    { label:"filter by field value", cmd:"df -h | awk '$5+0 > 80 {print $6, $5}'",
+      explain:"Mount point and usage for any filesystem over 80% — $5+0 coerces '87%' to a number. A one-line disk alarm." },
+    { label:"query JSON with jq", cmd:"curl -sS https://api.internal.corp/v1/status | jq '.items[] | select(.restarts > 5) | .name'",
+      explain:"jq is awk for JSON: select() keeps matching objects, the path plucks a field." },
+  ]},
+]},
+{ id:"lang", tag:"PKG 10", label:"python & node", diff:true, blurb:"The two runtimes you install everywhere — with distro wrinkles on both.",
+  resources:[
+  { id:"py-use", label:"python3 / pip", scenarios:[
+    { label:"install it", cmd:{u:"sudo apt install python3 python3-venv python3-pip", r:"sudo dnf install python3 python3-pip"},
+      explain:"Ubuntu splits venv into its own package; RHEL's python3 includes it." },
+    { label:"venv, then install", cmd:"python3 -m venv .venv && source .venv/bin/activate && pip install requests flask",
+      explain:"Modern distros mark system Python 'externally managed' (PEP 668), so the venv is the supported path. Delete .venv to undo everything." },
+    { label:"instant web server", cmd:"python3 -m http.server 8000",
+      explain:"Serves the current directory over HTTP — the fastest LAN file share. In the standard library." },
+  ]},
+  { id:"nd-use", label:"node / npm", scenarios:[
+    { label:"install a current LTS", cmd:{u:"curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install nodejs", r:"sudo dnf module enable nodejs:22 && sudo dnf install nodejs"},
+      explain:"Distro-default Node is often years old. NodeSource on Ubuntu; RHEL has dnf module streams. Many prefer per-user nvm.",
+      caution:"The Ubuntu path pipes a remote script into a root shell — standard, but read it or use nvm if that gives you pause." },
+    { label:"clean reproducible install", cmd:"npm ci",
+      explain:"Installs exactly what package-lock specifies, deleting node_modules first. Use ci in scripts and CI." },
+    { label:"audit for vulnerabilities", cmd:"npm audit --omit=dev",
+      explain:"Checks production deps against the vulnerability database. npm audit fix applies compatible updates." },
+  ]},
+]},
+{ id:"tools", tag:"PKG 11", label:"git · curl · tar", blurb:"The universal trio: version control, HTTP, and archives.",
+  resources:[
+  { id:"git-use", label:"git", scenarios:[
+    { label:"clone shallow (fast)", cmd:"git clone --depth 1 https://github.com/org/repo.git",
+      explain:"Latest snapshot without history — much faster for deploy or CI." },
+    { label:"stage, commit, push", cmd:"git add -A && git commit -m \"fix: correct healthcheck path\" && git push",
+      explain:"The core loop. Everything else in git elaborates on these three." },
+    { label:"undo last commit, keep work", cmd:"git reset --soft HEAD~1",
+      explain:"Removes the commit, leaves changes staged — when the code is right but the commit is wrong.",
+      caution:"Never rewrite commits already pushed to a shared branch." },
+  ]},
+  { id:"cu-use", label:"curl", scenarios:[
+    { label:"GET with headers visible", cmd:"curl -sSI https://api.internal.corp/health",
+      explain:"Just the response headers — status, redirects, content type in one line." },
+    { label:"POST JSON to an API", cmd:"curl -sS -X POST https://api.internal.corp/v1/items -H 'Content-Type: application/json' -d '{\"name\":\"widget\"}'",
+      explain:"Method, header, body — the API-testing workhorse. Chain | jq for a readable console." },
+    { label:"time a request's phases", cmd:"curl -sS -o /dev/null -w 'dns:%{time_namelookup} ttfb:%{time_starttransfer} total:%{time_total}\\n' https://api.internal.corp/health",
+      explain:"Splits 'the API is slow' into which phase is slow." },
+  ]},
+  { id:"tr-use", label:"tar", scenarios:[
+    { label:"create a dated archive", cmd:"tar -czf app-backup-$(date +%F).tar.gz /opt/app",
+      explain:"Create, gzip, to file, date in the name. Swap -z for --zstd for modern compression." },
+    { label:"extract into a place", cmd:"tar -xzf release.tar.gz -C /opt/app --strip-components=1",
+      explain:"Extracts into a target dir while stripping the top-level folder — lands exactly where you want." },
+  ]},
+]},
+{ id:"ops", tag:"PKG 12", label:"tmux · cron · openssl", blurb:"Sessions that survive, jobs at 3 a.m., and the crypto multitool.",
+  resources:[
+  { id:"tm-use", label:"tmux", scenarios:[
+    { label:"start a named session", cmd:"tmux new -s upgrade",
+      explain:"Everything inside keeps running even if your connection dies — it lives on the server." },
+    { label:"detach, later reattach", cmd:"tmux attach -t upgrade",
+      explain:"Detach with Ctrl-b d; reattach later and find your work as you left it. 90% of tmux's value." },
+  ]},
+  { id:"cr-use", label:"cron", scenarios:[
+    { label:"edit your crontab", cmd:"crontab -e",
+      explain:"Five time fields then the command: 30 2 * * 1 runs 02:30 every Monday." },
+    { label:"log the output, or lose it", cmd:"0 3 * * * /opt/scripts/cleanup.sh >> /var/log/cleanup.log 2>&1",
+      explain:"Cron fails silently by default — redirecting output is 'I saw why' vs 'hasn't run since March'." },
+  ]},
+  { id:"os-use", label:"openssl", scenarios:[
+    { label:"when does this cert expire?", cmd:"echo | openssl s_client -connect api.internal.corp:443 -servername api.internal.corp 2>/dev/null | openssl x509 -noout -dates",
+      explain:"Grabs a live endpoint's cert and prints validity dates. Script it into monitoring before the outage does." },
+    { label:"generate a random secret", cmd:"openssl rand -base64 32",
+      explain:"32 bytes of secure randomness — a proper API key, straight from the CSPRNG." },
+  ]},
+]},
+];
+
+const SSH = [
+{ id:"connect", label:"connect", blurb:"Opening a session on a remote host — the front door, and its most useful variations.",
+  resources:[
+  { id:"cn-basic", label:"session", scenarios:[
+    { label:"connect as a user", cmd:"ssh deploy@10.0.20.50",
+      explain:"Opens an interactive shell on the host as <em>deploy</em>. The everyday form — everything else is a flag on this." },
+    { label:"on a non-standard port", cmd:"ssh -p 2222 deploy@10.0.20.50",
+      explain:"Servers often move SSH off 22 to cut brute-force noise. -p points the client at the right port." },
+    { label:"with a specific key", cmd:"ssh -i ~/.ssh/id_deploy deploy@10.0.20.50",
+      explain:"Forces one identity file instead of offering every key in your agent. Handy when you juggle several." },
+    { label:"run one command and exit", cmd:"ssh deploy@10.0.20.50 'uptime && df -h'",
+      explain:"No interactive shell — runs the command, prints the output, disconnects. The basis of remote automation." },
+    { label:"force a password prompt", cmd:"ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password deploy@10.0.20.50",
+      explain:"Skips key auth entirely — for the first login to a fresh host, or proving a password still works." },
+  ]},
+]},
+{ id:"keys", label:"keygen", blurb:"Creating and inspecting key pairs — the credential SSH prefers over passwords.",
+  resources:[
+  { id:"kg-make", label:"key pair", scenarios:[
+    { label:"generate a modern key", cmd:"ssh-keygen -t ed25519 -C \"daemon@workstation\"",
+      explain:"Ed25519 — small, fast, strong. The comment labels the key in authorized_keys years later. Take the passphrase." },
+    { label:"a named key for one role", cmd:"ssh-keygen -t ed25519 -f ~/.ssh/id_deploy -C \"deploy@ci\"",
+      explain:"-f writes to a chosen file so a purpose-built key sits apart from your personal one." },
+    { label:"show a key's fingerprint", cmd:"ssh-keygen -lf ~/.ssh/id_ed25519.pub",
+      explain:"Prints the fingerprint and type — how you confirm which key you're about to hand out." },
+    { label:"change the passphrase", cmd:"ssh-keygen -p -f ~/.ssh/id_ed25519",
+      explain:"Re-encrypts the private key under a new passphrase without changing the key itself." },
+    { label:"recover the public half", cmd:"ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub",
+      explain:"Regenerates the .pub from the private key when you've lost it — the private key holds everything needed." },
+  ]},
+]},
+{ id:"install", label:"copy-id", blurb:"Putting your public key on a server so it trusts you without a password.",
+  resources:[
+  { id:"ci-easy", label:"authorized_keys", scenarios:[
+    { label:"install your key", cmd:"ssh-copy-id deploy@10.0.20.50",
+      explain:"Appends your public key with correct permissions, using your password one final time. Passwordless from here on." },
+    { label:"install a specific key", cmd:"ssh-copy-id -i ~/.ssh/id_deploy.pub deploy@10.0.20.50",
+      explain:"Pushes one chosen public key rather than every key you own." },
+    { label:"install it by hand", cmd:"cat ~/.ssh/id_ed25519.pub | ssh deploy@10.0.20.50 \"mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys\"",
+      explain:"When ssh-copy-id isn't available: make ~/.ssh with the right modes and append the key. Wrong permissions are the usual reason a key is silently ignored." },
+  ]},
+]},
+{ id:"config", label:"config", blurb:"~/.ssh/config turns long command lines into short, memorable host aliases.",
+  resources:[
+  { id:"cf-file", label:"client config", scenarios:[
+    { label:"add a host alias", cmd:"printf 'Host web01\\n  HostName 10.0.20.50\\n  User deploy\\n  Port 2222\\n  IdentityFile ~/.ssh/id_deploy\\n' >> ~/.ssh/config",
+      explain:"After this, <em>ssh web01</em> carries the host, user, port, and key automatically. The biggest quality-of-life win in SSH." },
+    { label:"view the current config", cmd:"cat ~/.ssh/config",
+      explain:"Read the aliases already defined before adding another — stanza order and duplicates matter." },
+    { label:"show the effective settings", cmd:"ssh -G web01",
+      explain:"Prints every option SSH will actually apply after merging all matching stanzas. Settles 'which key/port will it use?'" },
+    { label:"fix config permissions", cmd:"chmod 600 ~/.ssh/config",
+      explain:"SSH ignores a config that others can write. 600 keeps it owner-only." },
+  ]},
+]},
+{ id:"tunnel", label:"tunnels", blurb:"Forwarding ports through the encrypted session — reach services that were never exposed.",
+  resources:[
+  { id:"tn-local", label:"local forward (-L)", scenarios:[
+    { label:"reach a remote database", cmd:"ssh -N -L 5432:localhost:5432 deploy@db-server",
+      explain:"Local psql on localhost:5432 tunnels to the DB as seen from db-server. -N means 'tunnel only, no shell'." },
+    { label:"open an internal-only service", cmd:"ssh -N -L 8080:internal-api:80 deploy@bastion",
+      explain:"Forwards to a host the bastion can see but you can't — internal-api:80 becomes localhost:8080." },
+  ]},
+  { id:"tn-remote", label:"remote forward (-R)", scenarios:[
+    { label:"expose your local port on the server", cmd:"ssh -N -R 9000:localhost:3000 deploy@web-server",
+      explain:"The server's localhost:9000 reaches your local :3000 — handy for a webhook back to your laptop.",
+      caution:"Reaching it from other machines needs GatewayPorts set on the server. Only expose what you mean to." },
+  ]},
+  { id:"tn-socks", label:"dynamic SOCKS (-D)", scenarios:[
+    { label:"proxy your traffic through a host", cmd:"ssh -N -D 1080 deploy@bastion",
+      explain:"A SOCKS5 proxy on localhost:1080 routing through the bastion — point a browser at it to browse as that host." },
+  ]},
+]},
+{ id:"jump", label:"jump host", blurb:"Reaching machines only a bastion can see, in one command.",
+  resources:[
+  { id:"jp-proxy", label:"bastion / ProxyJump", scenarios:[
+    { label:"jump through a bastion", cmd:"ssh -J bastion.corp.local deploy@10.0.20.50",
+      explain:"SSH tunnels through the jump host to the target in a single hop — no manual two-step login." },
+    { label:"chain two jumps", cmd:"ssh -J bastion1,bastion2 deploy@10.0.30.10",
+      explain:"Comma-separated hops for a target behind two gateways. Each is traversed in order." },
+    { label:"make it permanent", cmd:"printf 'Host prod\\n  HostName 10.0.20.50\\n  ProxyJump bastion.corp.local\\n' >> ~/.ssh/config",
+      explain:"With ProxyJump in the config, <em>ssh prod</em> takes the bastion route by itself — set it once and forget the -J." },
+  ]},
+]},
+{ id:"agent", label:"agent", blurb:"ssh-agent holds your decrypted keys so you type the passphrase once per session.",
+  resources:[
+  { id:"ag-use", label:"ssh-agent / ssh-add", scenarios:[
+    { label:"start the agent", cmd:"eval \"$(ssh-agent -s)\"",
+      explain:"Launches the agent and exports the env vars this shell needs to reach it. Many desktops start one for you." },
+    { label:"add a key with a timeout", cmd:"ssh-add -t 8h ~/.ssh/id_ed25519",
+      explain:"Loads the key after one passphrase prompt; -t drops it after 8 hours so a forgotten laptop doesn't stay armed." },
+    { label:"list loaded keys", cmd:"ssh-add -l",
+      explain:"Fingerprints of every key the agent currently holds — a quick 'is my key even loaded?' check." },
+    { label:"forward the agent (carefully)", cmd:"ssh -A deploy@bastion",
+      explain:"Lets you use your local keys to hop onward from the remote host without copying keys there.",
+      caution:"Anyone with root on that host can use your agent while you're connected. Only forward to trusted hosts; prefer ProxyJump." },
+  ]},
+]},
+{ id:"transfer", label:"copy files", blurb:"Moving files over the same authenticated, encrypted channel as your shell.",
+  resources:[
+  { id:"tf-scp", label:"scp", scenarios:[
+    { label:"copy a file up", cmd:"scp ./app.tar.gz deploy@10.0.20.50:/opt/app/",
+      explain:"Local file to a remote path. The colon separates the host from the destination path." },
+    { label:"copy a directory down", cmd:"scp -r deploy@10.0.20.50:/var/log/app ./logs",
+      explain:"-r pulls a whole directory tree from the server into a local folder." },
+    { label:"copy via a jump host", cmd:"scp -J bastion.corp.local ./release.tar.gz deploy@10.0.20.50:/tmp/",
+      explain:"scp honours -J too, so a file can ride through the bastion to a host you can't reach directly." },
+  ]},
+  { id:"tf-sftp", label:"sftp", scenarios:[
+    { label:"an interactive file session", cmd:"sftp deploy@10.0.20.50",
+      explain:"A prompt with get, put, ls, cd — better than scp when you're browsing and grabbing files as you go." },
+  ]},
+  { id:"tf-rsync", label:"rsync over ssh", scenarios:[
+    { label:"sync a directory efficiently", cmd:"rsync -avz -e ssh ./site/ deploy@10.0.20.50:/var/www/site/",
+      explain:"Transfers only what changed and resumes cleanly. Mind trailing slashes: site/ means 'its contents'." },
+  ]},
+]},
+{ id:"harden", label:"harden sshd", diff:true, blurb:"Server-side settings that shrink the attack surface, edited in /etc/ssh/sshd_config. The service is named ssh on Ubuntu, sshd on RHEL.",
+  resources:[
+  { id:"hd-cfg", label:"sshd_config", scenarios:[
+    { label:"test config before applying", cmd:"sudo sshd -t",
+      explain:"Parses sshd_config and reports errors without touching the running service. Always the step before a reload." },
+    { label:"disable password logins", cmd:"sudo sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config",
+      explain:"Forces key-only auth, ending password brute-force at the door.",
+      caution:"Confirm a working key login in another session first — otherwise this locks you out completely." },
+    { label:"forbid root login", cmd:"sudo sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config",
+      explain:"Attackers always try root first. Log in as a user and use sudo instead." },
+    { label:"apply the changes", cmd:{u:"sudo systemctl reload ssh", r:"sudo systemctl reload sshd"},
+      explain:"Reload re-reads the config and keeps existing sessions alive — safer than restart. The unit name differs by distro." },
+  ]},
+]},
+{ id:"debug", label:"troubleshoot", blurb:"When a connection is refused, hangs, or won't authenticate — how to see why.",
+  resources:[
+  { id:"db-diag", label:"diagnose", scenarios:[
+    { label:"verbose connection trace", cmd:"ssh -vvv deploy@10.0.20.50",
+      explain:"Three levels of debug: key exchange, which identities are offered, auth methods tried. First move for 'Permission denied'." },
+    { label:"test auth non-interactively", cmd:"ssh -o BatchMode=yes deploy@10.0.20.50 true && echo OK",
+      explain:"BatchMode disables prompts, so it either authenticates by key and prints OK or fails fast — ideal for scripts and health checks." },
+    { label:"clear a changed host key", cmd:"ssh-keygen -R 10.0.20.50",
+      explain:"After a host is rebuilt you'll see 'REMOTE HOST IDENTIFICATION HAS CHANGED'. This drops the old key from known_hosts so you can reconnect.",
+      caution:"That warning can also mean a real man-in-the-middle. Only clear it when you know the host legitimately changed." },
+    { label:"is the port even open?", cmd:"nc -zv 10.0.20.50 22",
+      explain:"Separates 'network or firewall blocking 22' from an SSH-level problem. Connection refused vs timed out tells you which." },
+  ]},
+]},
+];
+
+const ROOTS = [
+  { id:"kubectl",  label:"kubectl",  sheet:"Command Readout", tree:KUBECTL,
+    intro:`<h2>How to read this atlas</h2><div class="explain">The map fans out left to right: <em>verb</em> → <em>resource</em> → <em>scenario</em>. Namespaces used: <em>production</em> · <em>staging</em> · <em>monitoring</em>, with objects like <em>api-gateway</em>, <em>postgres-0</em>, <em>worker-node-03</em>.</div>` },
+  { id:"docker",   label:"docker",   sheet:"Cargo Manifest",  tree:DOCKER,
+    intro:`<h2>Objects in this harbor</h2><div class="explain">Containers <em>web-frontend</em> · <em>api-server</em> · <em>postgres-db</em> — images <em>nginx:1.27</em> · <em>myapp:2.4.1</em> — network <em>app-net</em> — volume <em>pgdata</em>.</div>` },
+  { id:"linux",    label:"linux",    sheet:"Terminal Atlas",  tree:LINUX,
+    intro:`<h2>Ubuntu + RHEL in one atlas</h2><div class="explain">Branches marked <span class="gold">◆</span> diverge — <em>apt</em> vs <em>dnf</em>, <em>ufw</em> vs <em>firewalld</em>. Ubuntu shows as the primary command; the RHEL equivalent appears in a comparison block beneath it.</div>` },
+  { id:"ssh",      label:"ssh",      sheet:"Access Deck",     tree:SSH,
+    intro:`<h2>The remote-access atlas</h2><div class="explain">Branches run from opening a session outward: <em>connect</em> → <em>keygen</em> → <em>copy-id</em> → <em>config</em> → <em>tunnels</em> → <em>jump host</em> → <em>agent</em> → <em>copy files</em> → <em>harden sshd</em> → <em>troubleshoot</em>. The <span class="gold">◆</span> branch differs across distros (service <em>ssh</em> vs <em>sshd</em>). Hosts used: <em>10.0.20.50</em>, <em>bastion.corp.local</em>, <em>db-server</em>.</div>` },
+];
+
+/* ═══════════════════════ STATE + LAYOUT ENGINE ═══════════════════════ */
+const state = { rootIdx:0, verb:null, res:null, scen:null };
+const focus = { col:0, idx:0 };
+let colsCache = [];
+
+const mapPane = document.getElementById('mapPane');
+const mapInner= document.getElementById('mapInner');
+const nodesEl = document.getElementById('nodes');
+const wiresEl = document.getElementById('wires');
+const readout = document.getElementById('readoutBody');
+
+const PADX=30, GAP_X=64, NODE_H=36, GAP_Y=12, PAD_TOP=82, PAD_BOT=60;
+
+function root(){ return ROOTS[state.rootIdx]; }
+function cmdFor(s){ return typeof s.cmd==='string' ? s.cmd : s.cmd.u; }
+function cmdOther(s){ return typeof s.cmd==='string' ? null : s.cmd.r; }
+
+function measure(text){
+  const p=document.createElement('div'); p.className='node';
+  p.style.visibility='hidden'; p.style.position='absolute'; p.style.animation='none';
+  p.innerHTML=text; nodesEl.appendChild(p); const w=p.offsetWidth; p.remove(); return w;
+}
+function buildCols(){
+  const cols=[];
+  cols.push(ROOTS.map((r,i)=>({kind:'root', label:r.label, id:'__root'+i, rootIdx:i, selected:i===state.rootIdx})));
+  cols.push(root().tree.map(v=>({kind:'verb', label:v.label, id:v.id, tag:v.tag, hasDiff:v.diff, data:v})));
+  if(state.verb) cols.push(state.verb.resources.map(r=>({kind:'res', label:r.label, id:r.id, data:r})));
+  if(state.res)  cols.push(state.res.scenarios.map((s,i)=>({kind:'scen', label:s.label, id:state.res.id+'-s'+i, hasDiff:(typeof s.cmd!=='string'), data:s})));
+  return cols;
+}
+function nodeHTML(n){
+  const diff=n.hasDiff?'<span class="diff">◆</span>':'';
+  if(n.kind==='verb') return (n.tag?`<span class="tag">${n.tag}</span>`:'')+n.label+diff;
+  if(n.kind==='res')  return `<span class="tag">▸</span>${n.label}`;
+  if(n.kind==='scen') return n.label+diff;
+  return n.label;
+}
+function layout(){
+  nodesEl.innerHTML='';
+  const paneH=mapPane.clientHeight;
+  const cols=buildCols(); colsCache=cols;
+  const colW=cols.map(col=>Math.max(...col.map(n=>measure(nodeHTML(n)))));
+  const colX=[]; let x=PADX;
+  for(let i=0;i<cols.length;i++){ colX.push(x); x+=colW[i]+GAP_X; }
+  const totalW=x-GAP_X+PADX;
+  const maxCount=Math.max(...cols.map(c=>c.length));
+  const contentH=Math.max(paneH, PAD_TOP+PAD_BOT+maxCount*(NODE_H+GAP_Y));
+  const positions={};
+  const centerY=contentH/2;
+  cols.forEach((col,ci)=>{
+    if(ci===0){
+      /* atlas list: the selected atlas sits dead-centre, the rest stack above/below it */
+      const sel=state.rootIdx;
+      col.forEach((n,i)=>{ positions[n.id]={x:colX[0], y:centerY-NODE_H/2+(i-sel)*(NODE_H+GAP_Y), w:colW[0], col:0, i}; });
+      return;
+    }
+    const blockH=col.length*NODE_H+(col.length-1)*GAP_Y;
+    let anchor=centerY;
+    if(ci===2 && state.verb) anchor=positions[state.verb.id].y+NODE_H/2;
+    if(ci===3 && state.res)  anchor=positions[state.res.id].y+NODE_H/2;
+    let top=anchor-blockH/2;
+    top=Math.max(PAD_TOP, Math.min(top, contentH-PAD_BOT-blockH));
+    col.forEach((n,i)=>{ positions[n.id]={x:colX[ci], y:top+i*(NODE_H+GAP_Y), w:colW[ci], col:ci, i}; });
+  });
+  mapInner.style.width=totalW+'px'; mapInner.style.height=contentH+'px';
+  wiresEl.setAttribute('width',totalW); wiresEl.setAttribute('height',contentH); wiresEl.innerHTML='';
+  function wire(a,b,hot){
+    const A=positions[a],B=positions[b]; if(!A||!B)return;
+    const x1=A.x+A.nodeW, y1=A.y+NODE_H/2, x2=B.x, y2=B.y+NODE_H/2, mx=(x1+x2)/2;
+    const p=document.createElementNS('http://www.w3.org/2000/svg','path');
+    p.setAttribute('d',`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`);
+    p.setAttribute('fill','none'); p.setAttribute('stroke',hot?'var(--trace)':'var(--line-dim)');
+    p.setAttribute('stroke-width',hot?1.8:1); if(!hot)p.setAttribute('stroke-dasharray','4 4');
+    wiresEl.appendChild(p);
+  }
+  cols.flat().forEach(n=>{
+    const el=document.createElement('div');
+    const isSelRoot=n.kind==='root'&&n.selected;
+    const isDimRoot=n.kind==='root'&&!n.selected;
+    el.className='node'+(isSelRoot?' root':'')+(isDimRoot?' rootitem':'')+(n.kind==='scen'?' leaf':'');
+    el.innerHTML=nodeHTML(n);
+    const pos=positions[n.id];
+    el.style.left=pos.x+'px'; el.style.top=pos.y+'px';
+    el.dataset.col=pos.col; el.dataset.idx=pos.i;
+    nodesEl.appendChild(el); pos.nodeW=el.offsetWidth; pos.el=el;
+    const onPath=isSelRoot||(n.kind==='verb'&&state.verb&&n.id===state.verb.id)||(n.kind==='res'&&state.res&&n.id===state.res.id)||(n.kind==='scen'&&state.scen&&n.data===state.scen);
+    if(onPath&&!isSelRoot) el.classList.add('on-path');
+    if(isSelRoot&&state.verb) el.classList.add('on-path');
+    const colHasPick=(n.kind==='verb'&&state.verb)||(n.kind==='res'&&state.res)||(n.kind==='scen'&&state.scen);
+    if(colHasPick&&!onPath) el.classList.add('dimmed');
+    if(focus.col===pos.col&&focus.idx===pos.i) el.classList.add('focused');
+    el.tabIndex=-1;
+    el.addEventListener('click',()=>{ focus.col=pos.col; focus.idx=pos.i; select(n); });
+    el.addEventListener('mouseenter',()=>showReadoutForNode(n));                 /* preview on hover */
+    el.addEventListener('mouseleave',()=>showReadoutForNode(focusNodeEl()));     /* revert to focus */
+  });
+  const selRootId='__root'+state.rootIdx;
+  cols[1].forEach(v=>wire(selRootId,v.id, state.verb&&v.id===state.verb.id));
+  if(state.verb&&cols[2]) cols[2].forEach(r=>wire(state.verb.id,r.id, state.res&&r.id===state.res.id));
+  if(state.res&&cols[3])  cols[3].forEach(s=>wire(state.res.id,s.id, state.scen===s.data));
+  layout.positions=positions;
+}
+function select(n){
+  if(n.kind==='root'){ setRoot(n.rootIdx); return; }
+  if(n.kind==='verb'){ state.verb=(state.verb&&state.verb.id===n.id)?null:n.data; state.res=null; state.scen=null;
+    if(state.verb&&state.verb.resources.length===1) state.res=state.verb.resources[0]; }
+  else if(n.kind==='res'){ state.res=(state.res&&state.res.id===n.id)?null:n.data; state.scen=null; }
+  else if(n.kind==='scen'){ state.scen=(state.scen===n.data)?null:n.data; }
+  layout(); renderReadout();
+  requestAnimationFrame(()=>mapPane.scrollTo({left:mapInner.scrollWidth, behavior:'smooth'}));
+}
+function setRoot(idx){
+  state.rootIdx=(idx+ROOTS.length)%ROOTS.length;
+  state.verb=null; state.res=null; state.scen=null; focus.col=0; focus.idx=state.rootIdx;
+  document.body.dataset.root=root().id;
+  document.getElementById('rootLabel').textContent=root().label.toUpperCase();
+  document.getElementById('sheetTitle').textContent=root().sheet;
+  document.getElementById('sheetNo').textContent=`SHEET ${state.rootIdx+1}/${ROOTS.length}`;
+  document.getElementById('legendTitle').textContent=root().label.toUpperCase()+' ATLAS';
+  layout(); renderReadout(); mapPane.scrollTo({left:0, top:0});
+}
+
+/* keyboard navigation */
+function focusNodeEl(){ const cols=colsCache; if(focus.col>=cols.length) focus.col=cols.length-1;
+  const col=cols[focus.col]; focus.idx=Math.max(0,Math.min(focus.idx,col.length-1)); return col[focus.idx]; }
+function refreshFocusVisual(){
+  document.querySelectorAll('.node.focused').forEach(e=>e.classList.remove('focused'));
+  const n=focusNodeEl(); const pos=layout.positions[n.id];
+  if(pos&&pos.el){ pos.el.classList.add('focused'); pos.el.scrollIntoView({block:'nearest',inline:'nearest'}); }
+  showReadoutForNode(n);   /* description follows the keyboard focus */
+}
+/* Enter/→ on a scenario: assemble it, copy to clipboard, and send to the active shell */
+function fireScenario(n){
+  state.scen=n.data; layout(); renderReadout();
+  const cmd=cmdFor(n.data);
+  if(navigator.clipboard) navigator.clipboard.writeText(cmd).catch(()=>{});
+  Deck.sendActive(cmd);
+}
+window.addEventListener('keydown',(e)=>{
+  const tag=document.activeElement&&document.activeElement.tagName;
+  if(tag==='INPUT'||tag==='TEXTAREA') return;   /* typing in a terminal or field: leave it alone */
+  const cols=colsCache;
+  switch(e.key){
+    case 'ArrowUp': e.preventDefault();
+      focus.idx=Math.max(0,focus.idx-1); refreshFocusVisual(); break;
+    case 'ArrowDown': e.preventDefault();
+      focus.idx=Math.min(cols[focus.col].length-1,focus.idx+1); refreshFocusVisual(); break;
+    case 'ArrowRight': { e.preventDefault(); const n=focusNodeEl();
+      if(n.kind==='root'){ setRoot(n.rootIdx); focus.col=1; focus.idx=0; refreshFocusVisual(); }
+      else if(n.kind==='scen'){ state.scen=n.data; layout(); refreshFocusVisual(); }  /* select only — never sends */
+      else { select(n);
+        if(state.verb||state.res){ const nc=colsCache; if(focus.col+1<nc.length){ focus.col+=1; focus.idx=0; } }
+        refreshFocusVisual(); }
+      break; }
+    case 'Enter': case ' ': { e.preventDefault(); const n=focusNodeEl();
+      if(n.kind==='root'){ setRoot(n.rootIdx); focus.col=1; focus.idx=0; refreshFocusVisual(); }
+      else if(n.kind==='scen'){ fireScenario(n); refreshFocusVisual(); }  /* Enter sends to the active shell */
+      else { select(n);
+        if(state.verb||state.res){ const nc=colsCache; if(focus.col+1<nc.length){ focus.col+=1; focus.idx=0; } }
+        refreshFocusVisual(); }
+      break; }
+    case 'ArrowLeft': e.preventDefault();
+      if(focus.col>0){ focus.col--;
+        if(focus.col===0){ focus.idx=state.rootIdx; }
+        else { const sel=focus.col===1?state.verb:focus.col===2?state.res:null;
+          if(sel){ focus.idx=colsCache[focus.col].findIndex(x=>x.data===sel); if(focus.idx<0)focus.idx=0; } }
+        refreshFocusVisual(); } break;
+    case 'Escape': e.preventDefault();
+      if(state.scen){ state.scen=null; } else if(state.res){ state.res=null; focus.col=Math.min(focus.col,2); }
+      else if(state.verb){ state.verb=null; focus.col=Math.min(focus.col,1); }
+      layout(); renderReadout(); refreshFocusVisual(); break;
+  }
+});
+
+/* ═══════════════════════ READOUT ═══════════════════════ */
+/* `view` describes what to render: the committed state by default, or a hovered/
+   focused node's path for a live preview. It never mutates the actual selection. */
+function ctxForNode(n){
+  if(!n) return state;
+  if(n.kind==='root') return {rootIdx:n.rootIdx, verb:null, res:null, scen:null};
+  if(n.kind==='verb') return {rootIdx:state.rootIdx, verb:n.data, res:null, scen:null};
+  if(n.kind==='res')  return {rootIdx:state.rootIdx, verb:state.verb, res:n.data, scen:null};
+  if(n.kind==='scen') return {rootIdx:state.rootIdx, verb:state.verb, res:state.res, scen:n.data};
+  return state;
+}
+function showReadoutForNode(n){ renderReadout(ctxForNode(n)); }
+function renderReadout(view){
+  view = view || state;
+  const r=ROOTS[view.rootIdx];
+  const crumbs=`<div class="crumbs">
+      <span class="crumb set">${r.label}</span>
+      <span class="crumb ${view.verb?'set':''}">${view.verb?view.verb.label:'branch'}</span>
+      <span class="crumb ${view.res?'set':''}">${view.res?view.res.label:'target'}</span>
+      <span class="crumb ${view.scen?'set':''}">scenario</span></div>`;
+  let cmdHTML, ready=false, other=null;
+  if(view.scen){ ready=true; cmdHTML=escapeHTML(cmdFor(view.scen)); other=cmdOther(view.scen); }
+  else { const shellRoot=(r.id==='linux'||r.id==='ssh'); let partial=shellRoot?'$':r.label; if(view.verb&&!shellRoot) partial+=' '+view.verb.label.split(' / ')[0];
+         cmdHTML=escapeHTML(partial)+' <span class="cursor"></span>'; }
+  let body='';
+  if(view.scen){
+    body=`<h2>What this does</h2><div class="explain">${view.scen.explain}</div>`;
+    if(view.scen.caution) body+=`<div class="caution"><b>Handle with care</b>${view.scen.caution}</div>`;
+    body+=`<div class="hint"><kbd>↵</kbd> sends this straight into the <b>active</b> shell — the highlighted one below. Or <kbd>copy</kbd> it, or push to a specific one with <kbd>▶ term 1</kbd> / <kbd>▶ term 2</kbd>. Toggle <b>auto-run</b> in the deck header to choose whether sent commands execute or just stage at the prompt.</div>`;
+  } else if(view.res){
+    body=`<h2>Almost there</h2><div class="explain">Pick a <em>scenario</em> — each is a complete command with realistic names filled in.</div>`;
+  } else if(view.verb){
+    body=`<h2>About “${escapeHTML(view.verb.label)}”</h2><div class="explain">${view.verb.blurb}</div><div class="hint">Pick a <b>target</b>, then a scenario.</div>`;
+  } else {
+    body=r.intro+`<h2>Navigation</h2><div class="explain">The four atlases sit in a list on the left; the selected one moves to centre and fans out its branches. Hover or arrow onto any node to read it here. Keyboard: <kbd>▲</kbd><kbd>▼</kbd> move through the list or a column, <kbd>▶</kbd> opens the focused item, <kbd>◀</kbd> steps back, <kbd>↵</kbd> selects — and on a finished command, sends it into the active shell below. <kbd>esc</kbd> folds a level.</div>`;
+  }
+  const otherBlock=other?`<div class="otherdistro"><b>on RHEL</b>${escapeHTML(other)}</div>`:'';
+  const sendBtns = ready
+    ? `<button class="barbtn copybtn" id="copyBtn">copy</button>
+       <button class="barbtn sendbtn" id="send1" title="Send to Term 1">▶ term 1</button>
+       <button class="barbtn sendbtn" id="send2" title="Send to Term 2">▶ term 2</button>` : '';
+  readout.innerHTML = crumbs + `
+    <div class="cmdcard ${ready?'ready':''}">
+      <div class="bar"><span class="dot"></span>${ready?'command assembled':'building command'}${sendBtns}</div>
+      <pre>${cmdHTML}</pre>
+    </div>` + otherBlock + body;
+  if(ready){
+    const cmd=cmdFor(view.scen);
+    document.getElementById('copyBtn').onclick=()=>{ navigator.clipboard?.writeText(cmd).catch(()=>{
+      const ta=document.createElement('textarea'); ta.value=cmd; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); });
+      flashBtn('copyBtn','copied'); };
+    document.getElementById('send1').onclick=()=>Deck.send(cmd,1);
+    document.getElementById('send2').onclick=()=>Deck.send(cmd,2);
+  }
+}
+function flashBtn(id,txt){ const b=document.getElementById(id); if(!b)return; const o=b.textContent; b.textContent=txt; setTimeout(()=>b.textContent=o,1300); }
+function escapeHTML(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+/* ═══════════════════════ TERMINAL DECK ═══════════════════════ */
+const Deck = (function(){
+  const TERM_THEME = { background:'#05070c', foreground:'#d7e4f2', cursor:'#7BE3A3',
+    cursorAccent:'#05070c', selectionBackground:'rgba(255,255,255,.18)',
+    black:'#1c2530', red:'#ff8a76', green:'#7BE3A3', yellow:'#FFD36B', blue:'#6FA8DC',
+    magenta:'#C77DBA', cyan:'#4FC5A8', white:'#d7e4f2', brightBlack:'#5b6b7d' };
+  const terms={}, fits={}; let ws=null, wsReady=false, active=1, history=[], reconnectT=null;
+  const hasXterm = (typeof window.Terminal==='function' && window.FitAddon && typeof window.FitAddon.FitAddon==='function');
+
+  function statusEl(){ return document.getElementById('statusPill'); }
+  function setStatus(s){ const el=statusEl(); if(el){ el.dataset.state=s; el.textContent=s; } }
+
+  function init(){
+    if(!hasXterm){ setStatus('offline'); showManual(); return; }
+    [1,2].forEach(n=>{
+      const t=new window.Terminal({ fontFamily:"var(--mono)", fontFamily:"'IBM Plex Mono', monospace",
+        fontSize:13, cursorBlink:true, scrollback:6000, theme:TERM_THEME, allowProposedApi:true });
+      const fit=new window.FitAddon.FitAddon(); t.loadAddon(fit);
+      t.open(document.getElementById('term'+n)); try{ fit.fit(); }catch{}
+      t.onData(d=>wsSend({type:'input', term:n, data:d}));
+      t.onResize(({cols,rows})=>wsSend({type:'resize', term:n, cols, rows}));
+      document.getElementById('wrap'+n).addEventListener('mousedown',()=>setActive(n));
+      terms[n]=t; fits[n]=fit;
+    });
+    connect();
+    window.addEventListener('resize', fitAll);
+    setActive(1);
+  }
+  function showManual(){
+    /* xterm assets absent (page opened without the backend): keep offline hint visible */
+    ['1','2'].forEach(n=>{ const m=document.getElementById('term'+n); if(m) m.style.opacity='.4'; });
+  }
+  function connect(){
+    if(!hasXterm) return;
+    const params=new URLSearchParams(location.search);
+    const token=params.get('token');
+    if(location.protocol==='file:' || !token){ setStatus('offline'); offlineBanner(); return; }
+    setStatus('connecting');
+    const proto=location.protocol==='https:'?'wss':'ws';
+    try{ ws=new WebSocket(`${proto}://${location.host}/pty?token=${encodeURIComponent(token)}`); }
+    catch(e){ setStatus('offline'); return; }
+    ws.onopen=()=>{ wsReady=true; setStatus('live');
+      document.getElementById('wrap1').classList.add('connected');
+      document.getElementById('wrap2').classList.add('connected');
+      fitAll(); [1,2].forEach(n=>wsSend({type:'resize',term:n,cols:terms[n].cols,rows:terms[n].rows})); };
+    ws.onmessage=(e)=>{ let m; try{m=JSON.parse(e.data);}catch{return;}
+      if(m.type==='data'&&terms[m.term]) terms[m.term].write(m.data);
+      else if(m.type==='exit'&&terms[m.term]) terms[m.term].write(`\r\n\x1b[90m[process exited: ${m.code}]\x1b[0m\r\n`);
+      else if(m.type==='ready'){ const sm=document.getElementById('shellMeta'); if(sm) sm.textContent=m.shell?('· '+m.shell):''; } };
+    ws.onclose=()=>{ wsReady=false; setStatus('offline');
+      document.getElementById('wrap1').classList.remove('connected');
+      document.getElementById('wrap2').classList.remove('connected');
+      scheduleReconnect(); };
+    ws.onerror=()=>{ setStatus('offline'); };
+  }
+  function scheduleReconnect(){ clearTimeout(reconnectT); reconnectT=setTimeout(connect, 2500); }
+  function wsSend(o){ if(wsReady && ws && ws.readyState===1) ws.send(JSON.stringify(o)); }
+  function offlineBanner(){
+    if(!hasXterm) return;
+    [1,2].forEach(n=>{ terms[n].writeln('\x1b[90m— backend not connected —\x1b[0m');
+      terms[n].writeln('\x1b[90mrun \x1b[33mnpm start\x1b[90m and open the printed URL to get a live shell here.\x1b[0m'); });
+  }
+  function fitAll(){ [1,2].forEach(n=>{ if(fits[n]){ try{ fits[n].fit(); wsSend({type:'resize',term:n,cols:terms[n].cols,rows:terms[n].rows}); }catch{} } }); }
+  function setActive(n){ active=n;
+    document.getElementById('wrap1').classList.toggle('active', n===1);
+    document.getElementById('wrap2').classList.toggle('active', n===2); }
+
+  function send(cmd, n){
+    setActive(n);
+    const autorun=document.getElementById('autorun').checked;
+    if(wsReady){ wsSend({type:'input', term:n, data: autorun ? cmd+'\r' : cmd}); if(terms[n]) terms[n].focus(); }
+    else { if(hasXterm && terms[n]){ terms[n].writeln(`\x1b[33m(offline — would ${autorun?'run':'stage'}:)\x1b[0m ${cmd}`);} flashStatus(); }
+    pushHistory(cmd, n);
+  }
+  function sendActive(cmd){ send(cmd, active); }
+  function flashStatus(){ const el=statusEl(); if(!el)return; el.style.transform='scale(1.15)'; setTimeout(()=>el.style.transform='',200); }
+
+  function pushHistory(cmd, n){
+    history.unshift({cmd, n, t:new Date()}); if(history.length>200) history.pop(); renderHistory();
+  }
+  function renderHistory(){
+    const list=document.getElementById('histList'); const cnt=document.getElementById('histCount');
+    cnt.textContent=history.length;
+    if(!history.length){ list.innerHTML='<div class="hist-empty">Commands you send to a terminal appear here. Click one to send it again.</div>'; return; }
+    list.innerHTML=history.map((h,i)=>{
+      const time=h.t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+      return `<div class="hist-item" data-i="${i}" title="Click to re-send to Term ${h.n}">
+        <span class="badge t${h.n}">T${h.n}</span>
+        <span class="cmd">${escapeHTML(h.cmd)}</span>
+        <span class="time">${time}</span></div>`;
+    }).join('');
+    list.querySelectorAll('.hist-item').forEach(el=>{
+      el.addEventListener('click',()=>{ const h=history[+el.dataset.i]; send(h.cmd, h.n); });
+    });
+  }
+  function clearHistory(){ history=[]; renderHistory(); }
+
+  return { init, send, sendActive, fitAll, connect, clearHistory,
+    reconnect(){ if(ws){ try{ws.close();}catch{} } clearTimeout(reconnectT); connect(); } };
+})();
+
+/* ═══════════════════════ DECK CHROME: resize / collapse ═══════════════════════ */
+(function deckChrome(){
+  const stack=document.querySelector('.stack');
+  const gutter=document.getElementById('vgutter');
+  const deck=document.getElementById('deck');
+  let dragging=false;
+  function setDeckH(px){ const min=120, max=window.innerHeight-160;
+    px=Math.max(min, Math.min(max, px)); stack.style.setProperty('--deckH', px+'px'); Deck.fitAll(); }
+  gutter.addEventListener('pointerdown',(e)=>{ dragging=true; gutter.setPointerCapture(e.pointerId); e.preventDefault(); });
+  gutter.addEventListener('pointermove',(e)=>{ if(dragging) setDeckH(window.innerHeight - e.clientY); });
+  gutter.addEventListener('pointerup',(e)=>{ dragging=false; try{gutter.releasePointerCapture(e.pointerId);}catch{} });
+  gutter.addEventListener('dblclick',()=>toggleCollapse());
+  function toggleCollapse(){ deck.classList.toggle('collapsed');
+    document.getElementById('collapseBtn').textContent=deck.classList.contains('collapsed')?'expand':'collapse';
+    if(!deck.classList.contains('collapsed')) requestAnimationFrame(()=>Deck.fitAll()); }
+  document.getElementById('collapseBtn').addEventListener('click', toggleCollapse);
+  document.getElementById('reconnectBtn').addEventListener('click', ()=>Deck.reconnect());
+  document.getElementById('clearHist').addEventListener('click', ()=>Deck.clearHistory());
+})();
+
+/* ═══════════════════════ BOOT ═══════════════════════ */
+window.addEventListener('resize', ()=>layout());
+layout();
+renderReadout();
+refreshFocusVisual();
+Deck.init();
+</script>
+</body>
+</html>
