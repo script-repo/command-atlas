@@ -157,6 +157,13 @@ build tools or PAM headers. Run `sudo bash install.sh` (works on Ubuntu/Debian a
 Rocky Linux/RHEL/Fedora) to install them, or install the packages listed above by hand, then
 `rm -rf node_modules && npm install`.
 
+**Server prints "Missing dependencies. Run: npm install" even after `npm install` succeeds** —
+this means a stale `node_modules` from another OS/arch is sitting there (native addons like
+`node-pty` are platform-specific and `npm install` won't rebuild a package it thinks is already
+installed). Delete it and reinstall clean: `rm -rf node_modules package-lock.json && npm install`
+(or just re-run `sudo bash install.sh`, which does the same). This shouldn't happen on a fresh
+`git clone` going forward — `node_modules/` is no longer committed to the repo.
+
 **Server exits immediately with a root/permission error** — start it with `sudo npm start`
 (or run it under a systemd unit with `User=root`). PAM authentication and dropping privileges
 to another user's shell both require root.

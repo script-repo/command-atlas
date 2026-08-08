@@ -1,1 +1,5 @@
 logs/
+
+# Native addons (node-pty, authenticate-pam) are platform/arch-specific — never vendor
+# node_modules in git. Run `npm install` (or `sudo bash install.sh`) on the target host.
+node_modules/
