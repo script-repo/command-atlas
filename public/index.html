@@ -306,6 +306,20 @@ body{font-family:var(--sans);background:var(--paper);color:var(--ink);overflow:h
 .auth-submit:hover{background:color-mix(in srgb,var(--trace) 28%, transparent)}
 .auth-submit:disabled{opacity:.6;cursor:default}
 .auth-user{color:var(--ink-dim);font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:none}
+
+/* ---------- KUBECONFIG UPLOAD ---------- */
+.kubecfg-btn{
+  position:fixed;top:14px;right:16px;z-index:500;
+  display:inline-flex;align-items:center;gap:7px;
+  background:var(--panel);border:1px solid var(--line-dim);border-radius:7px;
+  color:var(--ink-dim);font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+  padding:7px 12px;cursor:pointer;backdrop-filter:blur(8px);
+  box-shadow:0 6px 18px rgba(0,0,0,.35);transition:border-color .15s,color .15s;
+}
+.kubecfg-btn:hover{border-color:var(--trace);color:var(--trace)}
+.kubecfg-btn svg{width:13px;height:13px;flex:0 0 auto}
+.kubecfg-btn.busy{opacity:.55;pointer-events:none}
+.kubecfg-btn.err{border-color:color-mix(in srgb,var(--warn) 55%,transparent);color:var(--warn)}
 </style>
 </head>
 <body data-root="kubectl">
@@ -325,6 +339,13 @@ body{font-family:var(--sans);background:var(--paper);color:var(--ink);overflow:h
     <button type="submit" class="auth-submit" id="authSubmit">Sign in</button>
   </form>
 </div>
+<button class="kubecfg-btn" id="kubecfgBtn" type="button" title="Upload your kubeconfig — saved to ~/.kube/config">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3v12"/><path d="M7 8l5-5 5 5"/><path d="M5 21h14"/>
+  </svg>
+  <span id="kubecfgLabel">kubeconfig</span>
+</button>
+<input type="file" id="kubecfgFile" accept=".yaml,.yml,.kubeconfig,text/yaml,text/x-yaml,text/plain" hidden>
 <div class="horizon"><div class="ceiling"></div><div class="floor"></div><div class="glowline"></div></div>
 
 <div class="stack">
@@ -1631,6 +1652,48 @@ const Auth = (function(){
 
   checkSession();
   return { expired(){ setUser(null); show('session expired — sign in again'); } };
+})();
+
+/* ═══════════════════════ KUBECONFIG UPLOAD ═══════════════════════ */
+(function kubeconfigUpload(){
+  const btn = document.getElementById('kubecfgBtn');
+  const fileInput = document.getElementById('kubecfgFile');
+  const label = document.getElementById('kubecfgLabel');
+  if(!btn || !fileInput || !label) return;
+  const defaultLabel = label.textContent;
+  let resetT = null;
+
+  function setLabel(txt, isError){
+    clearTimeout(resetT);
+    label.textContent = txt;
+    btn.classList.toggle('err', !!isError);
+    resetT = setTimeout(()=>{ label.textContent = defaultLabel; btn.classList.remove('err'); }, 2400);
+  }
+
+  btn.addEventListener('click', ()=> fileInput.click());
+
+  fileInput.addEventListener('change', async ()=>{
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = '';
+    if(!file) return;
+    if(file.size > 2*1024*1024){ setLabel('too large', true); return; }
+
+    let text;
+    try{ text = await file.text(); }
+    catch{ setLabel('read failed', true); return; }
+
+    btn.classList.add('busy');
+    try{
+      const r = await fetch('/api/kubeconfig', {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'text/plain'},
+        body: text,
+      });
+      const d = await r.json().catch(()=>({}));
+      setLabel(r.ok ? 'saved' : (d.error || 'failed'), !r.ok);
+    }catch{ setLabel('offline', true); }
+    finally{ btn.classList.remove('busy'); }
+  });
 })();
 
 /* ═══════════════════════ BOOT ═══════════════════════ */

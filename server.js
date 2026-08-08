@@ -24,6 +24,7 @@ const fs     = require('fs');
 const os     = require('os');
 const path   = require('path');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
 
 if (process.platform === 'win32') {
   console.error('\n  Command Atlas multi-user mode requires Linux.');
@@ -191,6 +192,20 @@ function readJsonBody(req, limit) {
   });
 }
 
+function readTextBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > limit) { reject(new Error('payload too large')); req.destroy(); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
 /* ---- auth API --------------------------------------------------------------- */
 
 async function handleLogin(req, res) {
@@ -239,15 +254,77 @@ function handleMe(req, res) {
   sendJson(res, 200, { username: session.username });
 }
 
+/* ---- kubeconfig upload -------------------------------------------------------- */
+
+const KUBECONFIG_MAX_BYTES = 2 * 1024 * 1024;
+
+// `getent passwd` reads the same user database `login -f` does (local files,
+// or LDAP/SSSD/etc. via nsswitch), so home dir/uid/gid always match the
+// account the user's shell actually runs as.
+function getPasswdEntry(username) {
+  return new Promise((resolve, reject) => {
+    execFile('getent', ['passwd', username], (err, stdout) => {
+      if (err) return reject(err);
+      const fields = stdout.trim().split(':');
+      if (fields.length < 7) return reject(new Error('unexpected getent output'));
+      resolve({ uid: Number(fields[2]), gid: Number(fields[3]), home: fields[5] });
+    });
+  });
+}
+
+function looksLikeKubeconfig(text) {
+  return /^\s*apiVersion:/m.test(text) && /^\s*clusters:/m.test(text) &&
+    /^\s*contexts:/m.test(text) && /^\s*users:/m.test(text);
+}
+
+async function handleKubeconfigUpload(req, res) {
+  const session = getSession(req);
+  if (!session) return sendJson(res, 401, { error: 'unauthenticated' });
+
+  let text;
+  try { text = await readTextBody(req, KUBECONFIG_MAX_BYTES); }
+  catch { return sendJson(res, 413, { error: 'file too large (max 2 MB)' }); }
+
+  if (!text.trim() || !looksLikeKubeconfig(text)) {
+    return sendJson(res, 400, { error: "that doesn't look like a kubeconfig (expected apiVersion/clusters/contexts/users)" });
+  }
+
+  let pw;
+  try { pw = await getPasswdEntry(session.username); }
+  catch { return sendJson(res, 500, { error: 'could not resolve your home directory' }); }
+
+  const kubeDir = path.join(pw.home, '.kube');
+  const configPath = path.join(kubeDir, 'config');
+
+  try {
+    fs.mkdirSync(kubeDir, { recursive: true, mode: 0o700 });
+    fs.chownSync(kubeDir, pw.uid, pw.gid);
+
+    if (fs.existsSync(configPath)) {
+      const backupPath = `${configPath}.bak-${Date.now()}`;
+      fs.renameSync(configPath, backupPath);
+      fs.chownSync(backupPath, pw.uid, pw.gid);
+    }
+
+    fs.writeFileSync(configPath, text, { mode: 0o600 });
+    fs.chownSync(configPath, pw.uid, pw.gid);
+  } catch (e) {
+    return sendJson(res, 500, { error: `failed to write kubeconfig: ${e.message}` });
+  }
+
+  sendJson(res, 200, { ok: true, path: configPath });
+}
+
 /* ---- HTTP server ------------------------------------------------------------ */
 
 function requestHandler(req, res) {
   const u = new URL(req.url, `http://${req.headers.host}`);
   const p = u.pathname;
 
-  if (req.method === 'POST' && p === '/api/login')  return void handleLogin(req, res);
-  if (req.method === 'POST' && p === '/api/logout') return void handleLogout(req, res);
-  if (req.method === 'GET'  && p === '/api/me')      return void handleMe(req, res);
+  if (req.method === 'POST' && p === '/api/login')       return void handleLogin(req, res);
+  if (req.method === 'POST' && p === '/api/logout')      return void handleLogout(req, res);
+  if (req.method === 'GET'  && p === '/api/me')          return void handleMe(req, res);
+  if (req.method === 'POST' && p === '/api/kubeconfig')  return void handleKubeconfigUpload(req, res);
 
   if (VENDOR[p]) return sendFile(res, VENDOR[p]);
 

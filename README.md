@@ -95,6 +95,23 @@ interface with `HOST=192.168.1.10 sudo npm start`.
   it again.
 - **logout** in the deck header ends your session and clears your terminals.
 
+### Uploading a kubeconfig
+
+The **kubeconfig** button in the top-right corner uploads a kubeconfig from your local machine
+straight into your account on the server, so `kubectl` in either terminal just works:
+
+1. Click **kubeconfig**, pick your `config`/`.yaml` file (it's read entirely in the browser —
+   nothing is stored client-side).
+2. It's sent to the server over your existing signed-in session and saved as `~/.kube/config`
+   **for your account specifically** — owned by you, mode `600`, in *your* home directory.
+   Other users on the host can't read or overwrite it, and it can't land in anyone else's home
+   directory.
+3. If you already had a `~/.kube/config`, it's renamed to `config.bak-<timestamp>` first rather
+   than being silently overwritten.
+
+The button is disabled behind the sign-in screen, and the upload is rejected (400) if the file
+doesn't look like a kubeconfig (no `apiVersion`/`clusters`/`contexts`/`users` keys) or is over 2 MB.
+
 ### Auto-run toggle (a safety choice)
 
 The deck header has **“auto-run sent commands”**, and it’s **off by default**. With it off,
@@ -127,6 +144,10 @@ read this before exposing it beyond your own machine:
   in your browser can't drive your terminal.
 - **Login is rate-limited.** Repeated failed sign-ins from the same address get locked out
   with backoff, to slow down password guessing.
+- **Kubeconfig uploads are session-scoped.** `POST /api/kubeconfig` requires a valid session and
+  always writes to *that session's own* `~/.kube/config` (owned by that user, mode `600`) — the
+  destination path is derived from the authenticated username via `getent`, never from anything
+  the client sends, so there's no way to target another user's files.
 
 Given all that, this is still meaningfully more exposed than the original localhost-only tool:
 
