@@ -187,26 +187,38 @@ provision_kubectl() {
   chmod +x /usr/local/bin/kubectl
 }
 
-# Docker Engine — official convenience script supports both package families.
+# Docker Engine.
 #
-# Some Kubernetes-node provisioning tooling (e.g. D2iQ/Nutanix Konvoy) ships a
-# dnf repo that sets `excludepkgs=docker-ce*`, on purpose, so a K8s node stays
-# on the containerd runtime it was built with. `--disableexcludes=all`
-# overrides *any* exclude rule from *any* repo/config for this one install, so
-# it still works there; if Docker genuinely isn't published for this
-# distro/arch, this still fails cleanly and `run_step` just warns and moves on.
+# On Debian/Ubuntu, get.docker.com's own dist-detection is reliable — use it
+# as-is. On RHEL-family, get.docker.com's Rocky/Alma detection points dnf at
+# https://download.docker.com/linux/rocky/, whose Packages/ directory does
+# not (as of writing) actually publish docker-ce, docker-ce-cli, or
+# docker-ce-rootless-extras — only containerd.io and the plugins. That's a
+# real gap in what Docker ships there, not a config/exclude problem. Rocky,
+# Alma, and RHEL 9 are all ABI-compatible EL9 rebuilds, so we point straight
+# at Docker's centos/9 tree instead, which does carry the engine packages
+# (as `el9` RPMs, same as Rocky's).
 provision_docker() {
   if command -v docker >/dev/null 2>&1; then
     echo "    Docker already installed ($(docker --version 2>/dev/null || true)), skipping"
     return 0
   fi
-  if ! curl -fsSL https://get.docker.com | sh; then
-    if [[ "$PKG_FAMILY" == rpm ]]; then
-      echo "    retrying with --disableexcludes=all (common on Kubernetes-managed nodes that exclude docker-ce*)"
-      "$PKG_MGR" install -y --disableexcludes=all \
-        docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-ce-rootless-extras docker-buildx-plugin || return 1
+
+  if [[ "$PKG_FAMILY" == deb ]]; then
+    curl -fsSL https://get.docker.com | sh || return 1
+  else
+    if [[ "$PKG_MGR" == dnf ]]; then
+      dnf install -y dnf-plugins-core || return 1
+      rm -f /etc/yum.repos.d/docker-ce.repo /etc/yum.repos.d/docker-ce-staging.repo
+      dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || return 1
+      dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin \
+        docker-ce-rootless-extras docker-buildx-plugin || return 1
     else
-      return 1
+      yum install -y yum-utils || return 1
+      rm -f /etc/yum.repos.d/docker-ce.repo /etc/yum.repos.d/docker-ce-staging.repo
+      yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || return 1
+      yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin \
+        docker-ce-rootless-extras docker-buildx-plugin || return 1
     fi
   fi
   systemctl enable --now docker 2>/dev/null || true

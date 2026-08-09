@@ -294,14 +294,16 @@ pulled these provisioning changes for the first time, also confirm you actually 
 `git pull` alone doesn't reload a running `node server.js`, and a browser will often cache the
 old page until you hard-refresh.
 
-**`dnf install docker-ce ...` fails with "Unable to find a match" on Rocky/RHEL, but only for
-`docker-ce`/`docker-ce-cli`/`docker-ce-rootless-extras`** — some Kubernetes-node provisioning
-tooling (D2iQ/Nutanix Konvoy, for example) ships a repo with `excludepkgs=docker-ce*` on
-purpose, to keep the node on the `containerd` runtime it was built with. `install.sh` retries
-with `--disableexcludes=all` automatically on rpm-family distros; if it still fails, or you're
-on a distro where Docker genuinely isn't published, that's reported as a warning and the rest
-of `install.sh` (kubectl, SSH, pwquality, lab accounts) still completes — a single provisioning
-step failing no longer aborts the whole script.
+**`dnf install docker-ce ...` fails with "Unable to find a match" on Rocky Linux, but only for
+`docker-ce`/`docker-ce-cli`/`docker-ce-rootless-extras`** (`containerd.io` and the plugins
+install fine) — Docker's own `https://download.docker.com/linux/rocky/` repo tree genuinely
+doesn't publish those three packages, only `containerd.io` and the buildx/compose/model
+plugins. Since Rocky, Alma, and RHEL 9 are all ABI-compatible EL9 rebuilds, `install.sh` points
+at Docker's `linux/centos/` tree instead on rpm-family distros, which does carry `el9` builds of
+the missing packages. If Docker still can't install (e.g. a genuinely unsupported distro/arch),
+that's reported as a warning and the rest of `install.sh` (kubectl, SSH, pwquality, lab
+accounts) still completes — a single provisioning step failing no longer aborts the whole
+script.
 
 ---
 
