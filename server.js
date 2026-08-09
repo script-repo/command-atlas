@@ -58,6 +58,13 @@ const SESSION_TTL_MS = (Number(process.env.ATLAS_SESSION_TTL_HOURS) || 12) * 360
 const SESSION_COOKIE = 'atlas_sid';
 const USERNAME_RE = /^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$/;
 
+// The one account allowed to bulk-reset the lab users' password (see
+// "reset all default pw" below). Configurable so a deployment can rename it
+// without touching code — defaults to the literal account name 'nutanix'.
+const RESET_PW_ADMIN   = process.env.ATLAS_RESET_PW_ADMIN || 'nutanix';
+const BULK_USER_PREFIX = process.env.ATLAS_BULK_USER_PREFIX || 'user-';
+const BULK_USER_COUNT  = Number(process.env.ATLAS_BULK_USER_COUNT) || 20;
+
 const TLS_CERT = process.env.ATLAS_TLS_CERT;
 const TLS_KEY  = process.env.ATLAS_TLS_KEY;
 const useTLS   = Boolean(TLS_CERT && TLS_KEY);
@@ -237,7 +244,8 @@ async function handleLogin(req, res) {
     recordLoginSuccess(ip);
     const sid = crypto.randomBytes(32).toString('hex');
     sessions.set(sid, { username, createdAt: Date.now(), lastActive: Date.now() });
-    sendJson(res, 200, { username }, { 'Set-Cookie': serializeSessionCookie(sid, Math.floor(SESSION_TTL_MS / 1000)) });
+    sendJson(res, 200, { username, isPasswordAdmin: username === RESET_PW_ADMIN },
+      { 'Set-Cookie': serializeSessionCookie(sid, Math.floor(SESSION_TTL_MS / 1000)) });
   }, { serviceName: PAM_SERVICE, remoteHost: ip });
 }
 
@@ -251,7 +259,7 @@ function handleLogout(req, res) {
 function handleMe(req, res) {
   const session = getSession(req);
   if (!session) return sendJson(res, 401, { error: 'unauthenticated' });
-  sendJson(res, 200, { username: session.username });
+  sendJson(res, 200, { username: session.username, isPasswordAdmin: session.username === RESET_PW_ADMIN });
 }
 
 /* ---- kubeconfig upload -------------------------------------------------------- */
@@ -315,6 +323,62 @@ async function handleKubeconfigUpload(req, res) {
   sendJson(res, 200, { ok: true, path: configPath });
 }
 
+/* ---- bulk lab-password reset (nutanix-only) --------------------------------- */
+
+// Zero-padded to at least 2 digits so the default config produces exactly
+// user-01..user-20, matching what install.sh provisions.
+function bulkUserList() {
+  const width = Math.max(2, String(BULK_USER_COUNT).length);
+  const out = [];
+  for (let i = 1; i <= BULK_USER_COUNT; i++) out.push(`${BULK_USER_PREFIX}${String(i).padStart(width, '0')}`);
+  return out;
+}
+
+function chpasswdBulk(entries) {
+  return new Promise((resolve, reject) => {
+    const child = execFile('chpasswd', [], (err, _stdout, stderr) => {
+      if (err) return reject(new Error(stderr || err.message));
+      resolve();
+    });
+    child.stdin.write(entries.map(([u, pw]) => `${u}:${pw}`).join('\n') + '\n');
+    child.stdin.end();
+  });
+}
+
+async function handleResetDefaultPasswords(req, res) {
+  const session = getSession(req);
+  if (!session) return sendJson(res, 401, { error: 'unauthenticated' });
+  if (session.username !== RESET_PW_ADMIN) return sendJson(res, 403, { error: 'forbidden' });
+
+  let body;
+  try { body = await readJsonBody(req, 4096); }
+  catch { return sendJson(res, 400, { error: 'bad request' }); }
+
+  const password = typeof body.password === 'string' ? body.password : '';
+  if (password.length < 8) return sendJson(res, 400, { error: 'password must be at least 8 characters' });
+  if (password.length > 256) return sendJson(res, 400, { error: 'password is too long' });
+  if (password.includes('\n') || password.includes(':')) {
+    return sendJson(res, 400, { error: 'password cannot contain a colon or newline' });
+  }
+
+  const targets = bulkUserList();
+  const present = [];
+  const skipped = [];
+  for (const u of targets) {
+    try { await getPasswdEntry(u); present.push(u); }
+    catch { skipped.push(u); }
+  }
+
+  if (!present.length) {
+    return sendJson(res, 404, { error: `none of ${targets[0]}..${targets[targets.length - 1]} exist on this host` });
+  }
+
+  try { await chpasswdBulk(present.map((u) => [u, password])); }
+  catch (e) { return sendJson(res, 500, { error: `chpasswd failed: ${e.message}` }); }
+
+  sendJson(res, 200, { ok: true, updated: present, skipped });
+}
+
 /* ---- HTTP server ------------------------------------------------------------ */
 
 function requestHandler(req, res) {
@@ -325,6 +389,7 @@ function requestHandler(req, res) {
   if (req.method === 'POST' && p === '/api/logout')      return void handleLogout(req, res);
   if (req.method === 'GET'  && p === '/api/me')          return void handleMe(req, res);
   if (req.method === 'POST' && p === '/api/kubeconfig')  return void handleKubeconfigUpload(req, res);
+  if (req.method === 'POST' && p === '/api/reset-default-passwords') return void handleResetDefaultPasswords(req, res);
 
   if (VENDOR[p]) return sendFile(res, VENDOR[p]);
 

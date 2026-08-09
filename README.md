@@ -14,8 +14,8 @@ Source: **https://github.com/script-repo/command-atlas**
 
 ```
 command-atlas/
-├── server.js       # backend: PAM login, sessions, and per-user PTY sessions
-├── install.sh       # fresh-system installer (Node.js, build tools, PAM headers, npm install)
+├── server.js       # backend: PAM login, sessions, per-user PTY sessions, bulk-password-reset API
+├── install.sh       # fresh-system installer + lab provisioning (see "Deployment provisioning" below)
 ├── package.json
 ├── public/
 │   └── index.html  # the atlas + terminal deck (one self-contained page)
@@ -34,12 +34,17 @@ command-atlas/
   addon on install:
   - **Debian/Ubuntu:** `sudo apt install -y build-essential python3 libpam0g-dev`
   - **RHEL/Rocky Linux/Fedora:** `sudo dnf install -y gcc gcc-c++ make python3 pam-devel`
+- **`kubectl`** and **Docker Engine**, for the command atlas's kubectl/docker sections to be
+  runnable for real — `install.sh` installs both automatically (see *Deployment provisioning*
+  below).
 - **Root.** The server process itself must run as root (see *Security* below).
 
 ## Quick install (Ubuntu/Debian, RHEL, Rocky Linux, Fedora)
 
 On a fresh box, this single command clones the repo and installs Node.js, the native build
-tools, the PAM dev headers, and the npm dependencies — everything needed to run it.
+tools, the PAM dev headers, and the npm dependencies — everything needed to run it. It also
+**provisions the box for lab use** (see the next section for exactly what that means — read it
+before running this on anything but a disposable lab host).
 [`install.sh`](./install.sh) auto-detects `apt-get` vs. `dnf`/`yum`, so the **same command**
 works on Ubuntu/Debian and on RHEL-family distros (Rocky Linux, RHEL, CentOS, Fedora):
 
@@ -53,8 +58,43 @@ To update and re-install later:
 cd command-atlas && git pull && sudo bash install.sh
 ```
 
+Re-running it is safe: package installs are idempotent, and the lab accounts described below
+only ever get their password *set* the first time they're created — never reset by a later
+`install.sh` run.
+
 If you'd rather install things yourself, clone the repo, see the manual package list above for
 your distro, then just run `npm install`.
+
+### Deployment provisioning — what `install.sh` changes on the host
+
+Beyond installing dependencies, `install.sh` makes these system-level changes, in order:
+
+1. **Lowers the PAM password-quality floor.** Sets `minlen = 8` (was distro-default 14) in
+   `/etc/security/pwquality.conf` — the same file/format on Debian/Ubuntu and RHEL-family, so
+   this needs no distro branching. ⚠️ This weakens the password policy for **every local
+   account**, not just the lab ones below — only run this on a host where that's acceptable.
+2. **Enables SSH with local-account password (PAM) authentication.** Installs/enables
+   `openssh-server`, then drops `PasswordAuthentication yes` + `UsePAM yes` into
+   `/etc/ssh/sshd_config.d/00-command-atlas.conf` (sorted early so it wins even against
+   distro/cloud-image drop-ins that disable password auth), reloads `sshd`, and opens the
+   firewall for SSH if `firewalld`/`ufw` is active. ⚠️ This makes **every local account**
+   remotely SSH-able with just a password, from anywhere that can reach port 22.
+3. **Installs `kubectl`** — the official static binary for your CPU architecture, from
+   `dl.k8s.io`, straight to `/usr/local/bin/kubectl`. Pairs with the kubeconfig upload feature
+   below so `kubectl` in a terminal just works.
+4. **Installs Docker Engine** via the official `get.docker.com` convenience script, then
+   enables the `docker` service.
+5. **Creates local lab accounts `user-01` through `user-20`** (`useradd -m`, `/bin/bash`,
+   plain accounts — no `sudo`, no extra groups), if they don't already exist. The password is
+   only set **at creation time**: pass `ATLAS_DEFAULT_PASSWORD=<value>` before running
+   `install.sh` to choose it, or leave it unset and a random 16-character password is generated
+   and printed once to the console (never written to this repo or any file). Nothing ever
+   overwrites these passwords on a later `install.sh` run — use the in-app **reset all default
+   pw** button below (or `passwd <user>` by hand) to change them afterward.
+
+None of this is appropriate for a general-purpose or production host — it's built for a
+disposable lab box that a small group of people are meant to be able to SSH/terminal into with
+a short shared password. See *Security* below before running it anywhere else.
 
 ## Run it
 
@@ -112,6 +152,15 @@ straight into your account on the server, so `kubectl` in either terminal just w
 The button is disabled behind the sign-in screen, and the upload is rejected (400) if the file
 doesn't look like a kubeconfig (no `apiVersion`/`clusters`/`contexts`/`users` keys) or is over 2 MB.
 
+### Resetting the lab accounts' default password
+
+If you sign in as the account named `nutanix` (configurable — see `ATLAS_RESET_PW_ADMIN`
+below), a **reset all default pw** button appears in the top-right corner. It's not shown to
+anyone else. Clicking it prompts for a new password (entered twice, minimum 8 characters) and,
+on submit, immediately overwrites the password for every `user-01`..`user-20` account that
+exists on the host — a fast way to re-arm a lab for a new session without SSHing in by hand or
+re-running `install.sh`. Accounts that don't exist are silently skipped and reported back.
+
 ### Auto-run toggle (a safety choice)
 
 The deck header has **“auto-run sent commands”**, and it’s **off by default**. With it off,
@@ -148,8 +197,22 @@ read this before exposing it beyond your own machine:
   always writes to *that session's own* `~/.kube/config` (owned by that user, mode `600`) — the
   destination path is derived from the authenticated username via `getent`, never from anything
   the client sends, so there's no way to target another user's files.
+- **Bulk password reset is admin-gated.** `POST /api/reset-default-passwords` requires a valid
+  session *and* that the session's username exactly matches `ATLAS_RESET_PW_ADMIN` (`nutanix` by
+  default) — anyone else gets a 403, and the button isn't even rendered for them. It only ever
+  touches the configured `user-01`..`user-20` range (`ATLAS_BULK_USER_PREFIX`/
+  `ATLAS_BULK_USER_COUNT`), skipping accounts that don't exist.
 
-Given all that, this is still meaningfully more exposed than the original localhost-only tool:
+Given all that, this is still meaningfully more exposed than the original localhost-only tool —
+and, if you've run `install.sh`'s provisioning steps, more exposed still:
+
+- **The password policy is weaker and SSH is open.** `install.sh` sets `pwquality.conf`'s
+  `minlen` to 8 and enables SSH password authentication for *every* local account on the box,
+  not just `user-01`..`user-20` — see *Deployment provisioning* above. Only do this on a
+  disposable lab host on a trusted network.
+- **20 accounts share one password at a time.** The lab accounts are meant to be easy to
+  reset/rotate as a group, not to be individually secure — don't put anything on this host that
+  a would-be lab participant with a guessable/shared password shouldn't be able to reach.
 
 - **Put TLS in front of it.** By default it serves plain HTTP, which means passwords and
   session cookies cross the network in cleartext. Either set `ATLAS_TLS_CERT` and
@@ -171,6 +234,10 @@ Given all that, this is still meaningfully more exposed than the original localh
 | `ATLAS_TLS_CERT` / `ATLAS_TLS_KEY` | *(unset)* | PEM paths — set both to serve HTTPS instead of HTTP |
 | `ATLAS_SESSION_TTL_HOURS` | `12` | How long a signed-in session stays valid |
 | `ATLAS_PAM_SERVICE` | `login` | PAM service name to authenticate against (see `/etc/pam.d/`) |
+| `ATLAS_RESET_PW_ADMIN` | `nutanix` | The one account allowed to see/use the "reset all default pw" button |
+| `ATLAS_BULK_USER_PREFIX` | `user-` | Username prefix targeted by the bulk password reset |
+| `ATLAS_BULK_USER_COUNT` | `20` | How many accounts (`<prefix>01`..`<prefix>NN`) the bulk reset targets |
+| `ATLAS_DEFAULT_PASSWORD` | *(random, printed once)* | Read by `install.sh` (not the server) — sets the initial password for newly-created lab accounts |
 
 ---
 
@@ -211,6 +278,17 @@ shell exits** — fixed in this version: closing a terminal now calls node-pty's
 `login`'s own PID and leave its shell child orphaned. If you hit this on a host that was running
 an older version, there may already be leaked shell processes from before the fix — check with
 `ps -ef | grep '[l]ogin -f'` and kill any that no longer correspond to an open browser tab.
+
+**SSH password login still refused after running `install.sh`** — some hardened images ship a
+drop-in under `/etc/ssh/sshd_config.d/` that also sets `PasswordAuthentication`; `install.sh`
+adds its own `00-command-atlas.conf` so it's read first (and wins), but only if
+`/etc/ssh/sshd_config` actually `Include`s that directory — check with
+`sshd -T | grep -i passwordauthentication` to see the value sshd is actually using, and confirm
+`sshd_config` has an `Include /etc/ssh/sshd_config.d/*.conf` line near the top.
+
+**"reset all default pw" button doesn't appear** — it only renders for the account named in
+`ATLAS_RESET_PW_ADMIN` (`nutanix` by default). Confirm you signed in as that exact account, and
+that the server was started with the same (or default) value of that variable.
 
 ---
 

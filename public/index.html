@@ -320,6 +320,35 @@ body{font-family:var(--sans);background:var(--paper);color:var(--ink);overflow:h
 .kubecfg-btn svg{width:13px;height:13px;flex:0 0 auto}
 .kubecfg-btn.busy{opacity:.55;pointer-events:none}
 .kubecfg-btn.err{border-color:color-mix(in srgb,var(--warn) 55%,transparent);color:var(--warn)}
+
+/* ---------- RESET DEFAULT PASSWORD (nutanix-only) ---------- */
+.resetpw-btn{
+  position:fixed;top:54px;right:16px;z-index:500;
+  display:inline-flex;align-items:center;gap:7px;
+  background:var(--panel);border:1px solid var(--line-dim);border-radius:7px;
+  color:var(--ink-dim);font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+  padding:7px 12px;cursor:pointer;backdrop-filter:blur(8px);
+  box-shadow:0 6px 18px rgba(0,0,0,.35);transition:border-color .15s,color .15s;
+}
+.resetpw-btn:hover{border-color:var(--gold);color:var(--gold)}
+.resetpw-btn svg{width:13px;height:13px;flex:0 0 auto}
+.resetpw-btn.hidden{display:none}
+.resetpw-overlay{
+  position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;
+  background:radial-gradient(circle at 50% 20%, rgba(20,30,50,.55), var(--paper) 70%);
+  backdrop-filter:blur(6px);
+}
+.resetpw-overlay.hidden{display:none}
+.resetpw-card{
+  width:320px;background:var(--panel);border:1px solid var(--line-dim);border-radius:10px;
+  padding:26px 24px;display:flex;flex-direction:column;gap:14px;box-shadow:0 20px 60px rgba(0,0,0,.5);
+}
+.resetpw-note{font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);min-height:14px;line-height:1.5}
+.resetpw-note.ok{color:var(--ok)}
+.resetpw-actions{display:flex;gap:8px}
+.resetpw-actions .auth-submit{flex:1}
+.resetpw-actions .cancel{background:transparent;border-color:var(--line-dim);color:var(--ink-dim)}
+.resetpw-actions .cancel:hover{background:transparent;border-color:var(--ink-dim);color:var(--ink)}
 </style>
 </head>
 <body data-root="kubectl">
@@ -346,6 +375,31 @@ body{font-family:var(--sans);background:var(--paper);color:var(--ink);overflow:h
   <span id="kubecfgLabel">kubeconfig</span>
 </button>
 <input type="file" id="kubecfgFile" accept=".yaml,.yml,.kubeconfig,text/yaml,text/x-yaml,text/plain" hidden>
+<button class="resetpw-btn hidden" id="resetPwBtn" type="button" title="Reset the default password for user-01..user-20">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="8" cy="15" r="4"/><path d="M11 12l7-7m0 0h4m-4 0v4"/>
+  </svg>
+  <span id="resetPwLabel">reset all default pw</span>
+</button>
+<div class="resetpw-overlay hidden" id="resetPwOverlay">
+  <div class="resetpw-card">
+    <div class="auth-title">Reset default password</div>
+    <div class="auth-sub">Applies to <span id="resetPwRange">user-01..user-20</span> on this host</div>
+    <label class="auth-field">
+      <span>New password</span>
+      <input type="password" id="resetPwNew" autocomplete="new-password" minlength="8">
+    </label>
+    <label class="auth-field">
+      <span>Confirm password</span>
+      <input type="password" id="resetPwConfirm" autocomplete="new-password" minlength="8">
+    </label>
+    <div class="resetpw-note" id="resetPwNote"></div>
+    <div class="resetpw-actions">
+      <button type="button" class="auth-submit cancel" id="resetPwCancel">Cancel</button>
+      <button type="button" class="auth-submit" id="resetPwSubmit" disabled>Apply</button>
+    </div>
+  </div>
+</div>
 <div class="horizon"><div class="ceiling"></div><div class="floor"></div><div class="glowline"></div></div>
 
 <div class="stack">
@@ -1609,14 +1663,16 @@ const Auth = (function(){
   const submitBtn=document.getElementById('authSubmit');
   const userLabel=document.getElementById('authUserLabel');
   const logoutBtn=document.getElementById('logoutBtn');
+  const resetPwBtn=document.getElementById('resetPwBtn');
   let booted=false;
 
   function setUser(username){ if(userLabel) userLabel.textContent = username ? ('· '+username) : ''; }
+  function setAdmin(isPasswordAdmin){ if(resetPwBtn) resetPwBtn.classList.toggle('hidden', !isPasswordAdmin); }
   function show(msg){ overlay.classList.remove('hidden'); errorEl.textContent = msg||''; passInput.value=''; setTimeout(()=>userInput.focus(),0); }
   function hide(){ overlay.classList.add('hidden'); errorEl.textContent=''; }
 
-  function boot(username){
-    setUser(username); hide();
+  function boot(username, isPasswordAdmin){
+    setUser(username); setAdmin(isPasswordAdmin); hide();
     if(!booted){ booted=true; Deck.init(); }
     else { Deck.reconnect(); }
   }
@@ -1624,7 +1680,7 @@ const Auth = (function(){
   async function checkSession(){
     try{
       const r=await fetch('/api/me', {credentials:'same-origin'});
-      if(r.ok){ const d=await r.json(); boot(d.username); }
+      if(r.ok){ const d=await r.json(); boot(d.username, d.isPasswordAdmin); }
       else show();
     }catch{ show('could not reach the server'); }
   }
@@ -1639,7 +1695,7 @@ const Auth = (function(){
         body: JSON.stringify({ username: userInput.value.trim(), password: passInput.value }),
       });
       const d=await r.json().catch(()=>({}));
-      if(r.ok) boot(d.username);
+      if(r.ok) boot(d.username, d.isPasswordAdmin);
       else { errorEl.textContent = d.error || 'sign-in failed'; passInput.value=''; passInput.focus(); }
     }catch{ errorEl.textContent='could not reach the server'; }
     finally{ submitBtn.disabled=false; }
@@ -1651,7 +1707,7 @@ const Auth = (function(){
   });
 
   checkSession();
-  return { expired(){ setUser(null); show('session expired — sign in again'); } };
+  return { expired(){ setUser(null); setAdmin(false); show('session expired — sign in again'); } };
 })();
 
 /* ═══════════════════════ KUBECONFIG UPLOAD ═══════════════════════ */
@@ -1693,6 +1749,59 @@ const Auth = (function(){
       setLabel(r.ok ? 'saved' : (d.error || 'failed'), !r.ok);
     }catch{ setLabel('offline', true); }
     finally{ btn.classList.remove('busy'); }
+  });
+})();
+
+/* ═══════════════════ RESET DEFAULT PASSWORD (nutanix-only) ═══════════════════ */
+(function resetDefaultPasswords(){
+  const btn=document.getElementById('resetPwBtn');
+  const overlay=document.getElementById('resetPwOverlay');
+  const newInput=document.getElementById('resetPwNew');
+  const confirmInput=document.getElementById('resetPwConfirm');
+  const note=document.getElementById('resetPwNote');
+  const submitBtn=document.getElementById('resetPwSubmit');
+  const cancelBtn=document.getElementById('resetPwCancel');
+  if(!btn || !overlay || !newInput || !confirmInput || !note || !submitBtn || !cancelBtn) return;
+
+  function reset(){ newInput.value=''; confirmInput.value=''; note.textContent=''; note.classList.remove('ok'); validate(); }
+  function open(){ reset(); overlay.classList.remove('hidden'); setTimeout(()=>newInput.focus(),0); }
+  function close(){ overlay.classList.add('hidden'); }
+
+  function validate(){
+    const pw=newInput.value, confirm=confirmInput.value;
+    const ok = pw.length>=8 && pw===confirm;
+    submitBtn.disabled = !ok;
+    if(pw && confirm && pw!==confirm){ note.textContent='passwords do not match'; note.classList.remove('ok'); }
+    else if(pw && pw.length<8){ note.textContent='minimum 8 characters'; note.classList.remove('ok'); }
+    else { note.textContent=''; }
+    return ok;
+  }
+
+  btn.addEventListener('click', open);
+  cancelBtn.addEventListener('click', close);
+  overlay.addEventListener('click', (e)=>{ if(e.target===overlay) close(); });
+  newInput.addEventListener('input', validate);
+  confirmInput.addEventListener('input', validate);
+
+  submitBtn.addEventListener('click', async ()=>{
+    if(!validate()) return;
+    submitBtn.disabled=true; note.classList.remove('ok'); note.textContent='applying…';
+    try{
+      const r=await fetch('/api/reset-default-passwords', {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ password: newInput.value }),
+      });
+      const d=await r.json().catch(()=>({}));
+      if(r.ok){
+        note.textContent = `updated ${d.updated ? d.updated.length : 0} account(s)`;
+        note.classList.add('ok');
+        setTimeout(close, 1600);
+      } else {
+        note.textContent = d.error || 'failed'; note.classList.remove('ok'); validate();
+      }
+    }catch{ note.textContent='could not reach the server'; note.classList.remove('ok'); }
+    finally{ submitBtn.disabled = !validate(); }
   });
 })();
 
