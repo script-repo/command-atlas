@@ -82,15 +82,21 @@ Beyond installing dependencies, `install.sh` makes these system-level changes, i
 3. **Installs `kubectl`** — the official static binary for your CPU architecture, from
    `dl.k8s.io`, straight to `/usr/local/bin/kubectl`. Pairs with the kubeconfig upload feature
    below so `kubectl` in a terminal just works.
-4. **Installs Docker Engine** via the official `get.docker.com` convenience script, then
-   enables the `docker` service.
-5. **Creates local lab accounts `user-01` through `user-20`** (`useradd -m`, `/bin/bash`,
-   plain accounts — no `sudo`, no extra groups), if they don't already exist. The password is
-   only set **at creation time**: pass `ATLAS_DEFAULT_PASSWORD=<value>` before running
-   `install.sh` to choose it, or leave it unset and a random 16-character password is generated
-   and printed once to the console (never written to this repo or any file). Nothing ever
-   overwrites these passwords on a later `install.sh` run — use the in-app **reset all default
-   pw** button below (or `passwd <user>` by hand) to change them afterward.
+4. **Installs Docker Engine** (see distro-specific notes below), enables the `docker` service,
+   and adds whoever actually ran `sudo bash install.sh` (`$SUDO_USER`, e.g. `nutanix`) to the
+   `docker` group so `docker` works without `sudo` — takes effect on their next login/shell, or
+   immediately with `newgrp docker`.
+5. **Creates local lab accounts `user-01` through `user-20`** (`useradd -m`, `/bin/bash`), if
+   they don't already exist, and puts them (and any that already existed from an earlier run)
+   in the **`docker` group**, so they can run `docker` without `sudo` — no other elevated
+   access. The password is only set **at creation time**: pass `ATLAS_DEFAULT_PASSWORD=<value>`
+   before running `install.sh` to choose it, or leave it unset and a random 16-character
+   password is generated and printed once to the console (never written to this repo or any
+   file). Nothing ever overwrites these passwords on a later `install.sh` run — use the in-app
+   **reset all default pw** button below (or `passwd <user>` by hand) to change them
+   afterward. Docker group membership only takes effect for a lab account's *next* login
+   session (e.g. its next `login -f` shell in the terminal deck) — no action needed for
+   sessions started after `install.sh` runs.
 
 None of this is appropriate for a general-purpose or production host — it's built for a
 disposable lab box that a small group of people are meant to be able to SSH/terminal into with
@@ -285,6 +291,16 @@ adds its own `00-command-atlas.conf` so it's read first (and wins), but only if
 `/etc/ssh/sshd_config` actually `Include`s that directory — check with
 `sshd -T | grep -i passwordauthentication` to see the value sshd is actually using, and confirm
 `sshd_config` has an `Include /etc/ssh/sshd_config.d/*.conf` line near the top.
+
+**`docker ps` says "permission denied while trying to connect to the docker API at
+unix:///var/run/docker.sock"`** — the docker socket is `root:docker 660`; only `root` or the
+`docker` group can use it without `sudo`. `install.sh` adds the account that ran it
+(`$SUDO_USER`) to that group automatically, but **group membership only applies to new login
+sessions** — log out and back in (or run `newgrp docker` in the current shell) after installing.
+`user-01`..`user-20` are added to the `docker` group automatically by `install.sh` (see
+*Deployment provisioning* above) — if `docker ps` still fails for one of them, it likely just
+needs a fresh login session (group membership applies to new sessions only), or `install.sh`
+hadn't successfully installed Docker yet when that account was created (re-run it).
 
 **"reset all default pw" button doesn't appear** — it only renders for the account named in
 `ATLAS_RESET_PW_ADMIN` (`nutanix` by default). Confirm you signed in as that exact account, and

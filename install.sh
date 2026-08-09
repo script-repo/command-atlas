@@ -11,8 +11,9 @@
 #   • relaxes PAM password-quality policy (minlen 8) in /etc/security/pwquality.conf
 #   • enables remote SSH with local-account password (PAM) auth
 #   • installs kubectl + Docker Engine
-#   • creates local lab accounts user-01..user-20 (password: $ATLAS_DEFAULT_PASSWORD,
-#     or a random one generated + printed once if unset)
+#   • creates local lab accounts user-01..user-20, in the docker group, with
+#     password $ATLAS_DEFAULT_PASSWORD (or a random one generated + printed
+#     once if unset)
 #
 # Auto-detects the package manager (apt-get, dnf, or yum), so the same
 # command works on Ubuntu/Debian as well as Rocky Linux/RHEL/Fedora.
@@ -108,6 +109,8 @@ run_step() {
     echo "    ⚠ warning: '$desc' failed — continuing with the rest of the install." >&2
   fi
 }
+
+DOCKER_GROUP_USER=""
 
 # Lower the local password-quality floor to 8 characters.
 #
@@ -222,6 +225,15 @@ provision_docker() {
     fi
   fi
   systemctl enable --now docker 2>/dev/null || true
+
+  # The docker socket is root:docker 660 — only root or the `docker` group
+  # can use `docker` without sudo. Add whoever actually ran
+  # `sudo bash install.sh` (the operator, e.g. nutanix) to that group; takes
+  # effect on their next login/shell (or `newgrp docker` in the current one).
+  if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]] && id "$SUDO_USER" >/dev/null 2>&1; then
+    usermod -aG docker "$SUDO_USER" || true
+    DOCKER_GROUP_USER="$SUDO_USER"
+  fi
 }
 
 run_step "Relaxing PAM password-quality policy (minlen -> 8) in /etc/security/pwquality.conf" provision_pwquality
@@ -248,7 +260,8 @@ fi
 
 CREATED_USERS=()
 provision_lab_users() {
-  local u ok=0
+  local u ok=0 has_docker_group=1
+  getent group docker >/dev/null 2>&1 && has_docker_group=0
   for i in $(seq -w 1 20); do
     u="user-$i"
     if ! id "$u" >/dev/null 2>&1; then
@@ -257,12 +270,18 @@ provision_lab_users() {
       else
         echo "    ⚠ warning: failed to create/set password for $u — continuing" >&2
         ok=1
+        continue
       fi
+    fi
+    # Retroactive too, so a re-run after Docker installs successfully still
+    # grants it to lab accounts created on an earlier run.
+    if [[ "$has_docker_group" -eq 0 ]]; then
+      usermod -aG docker "$u" || true
     fi
   done
   return "$ok"
 }
-run_step "Ensuring lab accounts user-01..user-20 exist" provision_lab_users
+run_step "Ensuring lab accounts user-01..user-20 exist (+ docker group)" provision_lab_users
 
 cat <<'EOF'
 
@@ -276,6 +295,13 @@ cat <<'EOF'
  local account on this machine.
 ------------------------------------------------------------
 EOF
+
+if [[ -n "$DOCKER_GROUP_USER" ]]; then
+  echo " Added '$DOCKER_GROUP_USER' to the docker group so 'docker' works"
+  echo " without sudo. Log out and back in (or run: newgrp docker) for it"
+  echo " to take effect in this shell."
+  echo "------------------------------------------------------------"
+fi
 
 if [[ "${#CREATED_USERS[@]}" -gt 0 ]]; then
   echo " Created ${#CREATED_USERS[@]} new lab account(s): ${CREATED_USERS[*]}"
