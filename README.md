@@ -288,7 +288,20 @@ adds its own `00-command-atlas.conf` so it's read first (and wins), but only if
 
 **"reset all default pw" button doesn't appear** — it only renders for the account named in
 `ATLAS_RESET_PW_ADMIN` (`nutanix` by default). Confirm you signed in as that exact account, and
-that the server was started with the same (or default) value of that variable.
+that the server was started with the same (or default) value of that variable. If you just
+pulled these provisioning changes for the first time, also confirm you actually re-ran
+`sudo bash install.sh` (to create `user-01`..`user-20`) *and* restarted the server process —
+`git pull` alone doesn't reload a running `node server.js`, and a browser will often cache the
+old page until you hard-refresh.
+
+**`dnf install docker-ce ...` fails with "Unable to find a match" on Rocky/RHEL, but only for
+`docker-ce`/`docker-ce-cli`/`docker-ce-rootless-extras`** — some Kubernetes-node provisioning
+tooling (D2iQ/Nutanix Konvoy, for example) ships a repo with `excludepkgs=docker-ce*` on
+purpose, to keep the node on the `containerd` runtime it was built with. `install.sh` retries
+with `--disableexcludes=all` automatically on rpm-family distros; if it still fails, or you're
+on a distro where Docker genuinely isn't published, that's reported as a warning and the rest
+of `install.sh` (kubectl, SSH, pwquality, lab accounts) still completes — a single provisioning
+step failing no longer aborts the whole script.
 
 ---
 
