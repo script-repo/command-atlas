@@ -110,7 +110,8 @@ run_step() {
   fi
 }
 
-DOCKER_GROUP_USER=""
+declare -A DOCKER_GROUP_SEEN=()
+DOCKER_GROUP_USERS=()
 
 # Lower the local password-quality floor to 8 characters.
 #
@@ -202,38 +203,56 @@ provision_kubectl() {
 # at Docker's centos/9 tree instead, which does carry the engine packages
 # (as `el9` RPMs, same as Rocky's).
 provision_docker() {
+  local already_installed=0
   if command -v docker >/dev/null 2>&1; then
-    echo "    Docker already installed ($(docker --version 2>/dev/null || true)), skipping"
-    return 0
+    echo "    Docker already installed ($(docker --version 2>/dev/null || true)), skipping install"
+    already_installed=1
   fi
 
-  if [[ "$PKG_FAMILY" == deb ]]; then
-    curl -fsSL https://get.docker.com | sh || return 1
-  else
-    if [[ "$PKG_MGR" == dnf ]]; then
-      dnf install -y dnf-plugins-core || return 1
-      rm -f /etc/yum.repos.d/docker-ce.repo /etc/yum.repos.d/docker-ce-staging.repo
-      dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || return 1
-      dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin \
-        docker-ce-rootless-extras docker-buildx-plugin || return 1
+  if [[ "$already_installed" -eq 0 ]]; then
+    if [[ "$PKG_FAMILY" == deb ]]; then
+      curl -fsSL https://get.docker.com | sh || return 1
     else
-      yum install -y yum-utils || return 1
-      rm -f /etc/yum.repos.d/docker-ce.repo /etc/yum.repos.d/docker-ce-staging.repo
-      yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || return 1
-      yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin \
-        docker-ce-rootless-extras docker-buildx-plugin || return 1
+      if [[ "$PKG_MGR" == dnf ]]; then
+        dnf install -y dnf-plugins-core || return 1
+        rm -f /etc/yum.repos.d/docker-ce.repo /etc/yum.repos.d/docker-ce-staging.repo
+        dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || return 1
+        dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin \
+          docker-ce-rootless-extras docker-buildx-plugin || return 1
+      else
+        yum install -y yum-utils || return 1
+        rm -f /etc/yum.repos.d/docker-ce.repo /etc/yum.repos.d/docker-ce-staging.repo
+        yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || return 1
+        yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin \
+          docker-ce-rootless-extras docker-buildx-plugin || return 1
+      fi
     fi
   fi
   systemctl enable --now docker 2>/dev/null || true
 
   # The docker socket is root:docker 660 — only root or the `docker` group
-  # can use `docker` without sudo. Add whoever actually ran
-  # `sudo bash install.sh` (the operator, e.g. nutanix) to that group; takes
-  # effect on their next login/shell (or `newgrp docker` in the current one).
-  if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]] && id "$SUDO_USER" >/dev/null 2>&1; then
-    usermod -aG docker "$SUDO_USER" || true
-    DOCKER_GROUP_USER="$SUDO_USER"
-  fi
+  # can use `docker` without sudo. Add BOTH whoever actually ran
+  # `sudo bash install.sh` ($SUDO_USER, e.g. nutanix) AND the app's
+  # configured admin account (ATLAS_RESET_PW_ADMIN, default `nutanix` — see
+  # server.js) to that group. We check both rather than only $SUDO_USER
+  # because $SUDO_USER is unset when this script is run as root directly
+  # (no `sudo`, e.g. an already-root console/SSH session) — that used to
+  # mean nobody, including the admin account, ever got docker access. This
+  # now also runs unconditionally (not gated behind a fresh install above),
+  # so re-running install.sh after Docker was already present (e.g. baked
+  # into a lab image) still grants group membership. Takes effect on next
+  # login/shell (or `newgrp docker` in the current one).
+  local admin="${ATLAS_RESET_PW_ADMIN:-nutanix}"
+  local u
+  for u in "${SUDO_USER:-}" "$admin"; do
+    [[ -n "$u" && "$u" != root ]] || continue
+    id "$u" >/dev/null 2>&1 || continue
+    usermod -aG docker "$u" || true
+    if [[ -z "${DOCKER_GROUP_SEEN[$u]:-}" ]]; then
+      DOCKER_GROUP_SEEN[$u]=1
+      DOCKER_GROUP_USERS+=("$u")
+    fi
+  done
 }
 
 run_step "Relaxing PAM password-quality policy (minlen -> 8) in /etc/security/pwquality.conf" provision_pwquality
@@ -254,7 +273,19 @@ run_step "Installing Docker Engine" provision_docker
 DEFAULT_PASSWORD="${ATLAS_DEFAULT_PASSWORD:-}"
 GENERATED_PASSWORD=0
 if [[ -z "$DEFAULT_PASSWORD" ]]; then
-  DEFAULT_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+  # `head -c 16` closes its end of the pipe as soon as it has its 16 bytes,
+  # which sends `tr` a SIGPIPE on its next write. `tr` then exits non-zero
+  # (128+SIGPIPE), and with `set -o pipefail` on, that makes the *pipeline's*
+  # exit status non-zero too — even though $DEFAULT_PASSWORD is captured
+  # correctly. Under `set -e`, that silently killed the whole install right
+  # here, before it ever reached lab-user creation below. `|| true` keeps the
+  # (correct) captured output while not letting that expected non-zero status
+  # abort the script.
+  DEFAULT_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)" || true
+  if [[ -z "$DEFAULT_PASSWORD" ]]; then
+    echo "error: failed to generate a random default password" >&2
+    exit 1
+  fi
   GENERATED_PASSWORD=1
 fi
 
@@ -296,10 +327,10 @@ cat <<'EOF'
 ------------------------------------------------------------
 EOF
 
-if [[ -n "$DOCKER_GROUP_USER" ]]; then
-  echo " Added '$DOCKER_GROUP_USER' to the docker group so 'docker' works"
-  echo " without sudo. Log out and back in (or run: newgrp docker) for it"
-  echo " to take effect in this shell."
+if [[ "${#DOCKER_GROUP_USERS[@]}" -gt 0 ]]; then
+  echo " Added '${DOCKER_GROUP_USERS[*]}' to the docker group so 'docker'"
+  echo " works without sudo. Log out and back in (or run: newgrp docker) in"
+  echo " that account's shell for it to take effect."
   echo "------------------------------------------------------------"
 fi
 

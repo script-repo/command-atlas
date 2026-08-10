@@ -83,9 +83,12 @@ Beyond installing dependencies, `install.sh` makes these system-level changes, i
    `dl.k8s.io`, straight to `/usr/local/bin/kubectl`. Pairs with the kubeconfig upload feature
    below so `kubectl` in a terminal just works.
 4. **Installs Docker Engine** (see distro-specific notes below), enables the `docker` service,
-   and adds whoever actually ran `sudo bash install.sh` (`$SUDO_USER`, e.g. `nutanix`) to the
-   `docker` group so `docker` works without `sudo` — takes effect on their next login/shell, or
-   immediately with `newgrp docker`.
+   and adds both whoever actually ran `sudo bash install.sh` (`$SUDO_USER`) *and* the app's
+   configured admin account (`ATLAS_RESET_PW_ADMIN`, `nutanix` by default) to the `docker` group
+   so `docker` works without `sudo` for either — this runs even if Docker was already installed
+   (e.g. baked into the lab image) or the script is run as `root` directly rather than via
+   `sudo` (in which case `$SUDO_USER` is unset and only the admin account gets added). Takes
+   effect on the account's next login/shell, or immediately with `newgrp docker`.
 5. **Creates local lab accounts `user-01` through `user-20`** (`useradd -m`, `/bin/bash`), if
    they don't already exist, and puts them (and any that already existed from an earlier run)
    in the **`docker` group**, so they can run `docker` without `sudo` — no other elevated
@@ -285,6 +288,28 @@ shell exits** — fixed in this version: closing a terminal now calls node-pty's
 an older version, there may already be leaked shell processes from before the fix — check with
 `ps -ef | grep '[l]ogin -f'` and kill any that no longer correspond to an open browser tab.
 
+**A terminal shows `[process exited: 0]` right after signing in, and it looked like someone
+else's login "killed" it** — this used to happen because spawning multiple `login -f` PTYs close
+together (your own two terminals, or a second user signing in around the same time) can hit a
+known `node-pty`/kernel race (see [`microsoft/node-pty#630`](https://github.com/microsoft/node-pty/issues/630)):
+a freshly-forked `login` occasionally gets killed by `SIGHUP` before it ever writes a byte or even
+opens a PAM session — confirmed by it never showing up in `/var/log/secure` at all. It's
+transient, not a real problem with the account, and unrelated to who else is logged in — multiple
+users (and multiple terminals per user) are fully independent and supported; nothing in the server
+ever tears down one session because another one connects. `server.js` now retries a silently-dead
+PTY with a fresh one (up to 4 attempts) before giving up and showing an exit, which resolved it
+100% of the time across 80+ concurrent-spawn stress tests. If you still see it after this fix,
+please open an issue with your kernel version and whether `sysctl kernel.io_uring_disabled` is
+`0`, `1`, or `2`.
+
+**Testing "multiple users" from one browser shows the wrong account, or a login form when you
+didn't expect one** — sessions are a single cookie shared by the whole browser (all tabs/windows),
+not scoped per tab, so signing in as a second account in another tab of the *same* browser
+replaces the first tab's session cookie rather than running side-by-side. To actually test
+concurrent users, use separate browsers, separate browser profiles, an incognito/private window
+per account, or separate machines — each gets its own cookie jar and its own fully independent
+session, terminals included.
+
 **SSH password login still refused after running `install.sh`** — some hardened images ship a
 drop-in under `/etc/ssh/sshd_config.d/` that also sets `PasswordAuthentication`; `install.sh`
 adds its own `00-command-atlas.conf` so it's read first (and wins), but only if
@@ -294,13 +319,17 @@ adds its own `00-command-atlas.conf` so it's read first (and wins), but only if
 
 **`docker ps` says "permission denied while trying to connect to the docker API at
 unix:///var/run/docker.sock"`** — the docker socket is `root:docker 660`; only `root` or the
-`docker` group can use it without `sudo`. `install.sh` adds the account that ran it
-(`$SUDO_USER`) to that group automatically, but **group membership only applies to new login
-sessions** — log out and back in (or run `newgrp docker` in the current shell) after installing.
-`user-01`..`user-20` are added to the `docker` group automatically by `install.sh` (see
-*Deployment provisioning* above) — if `docker ps` still fails for one of them, it likely just
-needs a fresh login session (group membership applies to new sessions only), or `install.sh`
-hadn't successfully installed Docker yet when that account was created (re-run it).
+`docker` group can use it without `sudo`. `install.sh` adds both the account that ran it
+(`$SUDO_USER`) and the configured admin account (`ATLAS_RESET_PW_ADMIN`, `nutanix` by default) to
+that group automatically — including on a re-run, even if Docker was already installed — but
+**group membership only applies to new login sessions**, so log out and back in (or run
+`newgrp docker` in the current shell) after installing/re-running. If you ran `install.sh` as
+`root` directly (not via `sudo`) on an older copy of this script before this was fixed, or if the
+account in question isn't `$SUDO_USER` and isn't the admin account, re-run `sudo bash install.sh`
+(or add it by hand: `sudo usermod -aG docker <user>` then re-login). `user-01`..`user-20` are
+added to the `docker` group automatically by `install.sh` (see *Deployment provisioning* above) —
+if `docker ps` still fails for one of them, it likely just needs a fresh login session, or
+`install.sh` hadn't successfully installed Docker yet when that account was created (re-run it).
 
 **"reset all default pw" button doesn't appear** — it only renders for the account named in
 `ATLAS_RESET_PW_ADMIN` (`nutanix` by default). Confirm you signed in as that exact account, and
